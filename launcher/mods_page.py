@@ -144,7 +144,7 @@ class ModsPage:
     def _open_mods(self):
         d = self.mods_dir()
         if d:
-            from .gui import open_path
+            from .app_util import open_path
             open_path(d)
 
     def _play_build(self):
@@ -586,7 +586,7 @@ class NewBuildDialog:
     """Создание сборки: версия Minecraft + загрузчик + его версия."""
 
     def __init__(self, page):
-        from .gui import Dialog
+        from .dialogs import Dialog
         self.page = page
         app = page.app
         self.app = app

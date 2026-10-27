@@ -255,7 +255,7 @@ class ServerDialog:
     """Добавление или изменение своего сервера."""
 
     def __init__(self, page, entry=None):
-        from .gui import Dialog
+        from .dialogs import Dialog
         self.page, self.app, self.entry = page, page.app, entry
         app, px = self.app, self.app.px
         d = Dialog(app, "Сервер", "Изменить сервер" if entry else "Новый сервер",
@@ -362,7 +362,7 @@ class PremiumDialog:
     а если Boosty на сайте не настроен — вручную через админку."""
 
     def __init__(self, app, reason=None):
-        from .gui import Dialog
+        from .dialogs import Dialog
         self.app = app
         px = app.px
         info = app.premium.info or {}
