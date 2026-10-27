@@ -1,0 +1,1 @@
+"""ZeleesLauncher core package."""

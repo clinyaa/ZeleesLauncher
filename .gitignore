@@ -1,0 +1,22 @@
+# сборка и локальные данные
+data/
+dist/
+build/
+release/
+__pycache__/
+*.pyc
+*.spec
+
+# секреты — никогда не в репозиторий
+*.key
+update_signing.key
+.zelees/
+
+# готовые установщики и пакеты обновлений (лежат на сайте, не в git)
+server/site/download/
+*.exe
+tools/update_config.json
+
+# серверная часть сайта — не публикуется
+server/
+ИНСТРУКЦИЯ.txt
