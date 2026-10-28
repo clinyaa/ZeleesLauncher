@@ -2,7 +2,7 @@
 import sys
 import tkinter as tk
 
-from .config import APP_NAME, APP_VERSION
+from .config import APP_VERSION
 from .ui_kit import C
 
 IS_WIN = sys.platform.startswith("win")

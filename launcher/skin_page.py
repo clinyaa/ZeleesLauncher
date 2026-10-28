@@ -120,7 +120,7 @@ class SkinPage:
         self._render()
 
     def _render(self):
-        cv, px = self.cv, self.px
+        cv = self.cv
         cv.delete("m")
         if not self.faces:
             return

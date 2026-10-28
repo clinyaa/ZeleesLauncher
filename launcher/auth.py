@@ -3,7 +3,6 @@ import base64
 import hashlib
 import http.server
 import secrets
-import threading
 import time
 import urllib.parse
 

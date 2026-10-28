@@ -28,6 +28,7 @@ from .versions import Manifest
 from .window import TB_H, TitleBar, make_borderless, set_app_id
 from .ui_kit import C, Assets, Fonts, PillButton
 
+__all__ = ["App", "Dialog", "run"]
 
 # =====================================================================================
 class App(PagesMixin, VersionsMixin, AccountsMixin, LaunchMixin, UpdateMixin):
