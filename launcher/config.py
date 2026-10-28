@@ -5,7 +5,7 @@ import sys
 import threading
 
 APP_NAME = "ZeleesLauncher"
-APP_VERSION = "1.0.12"
+APP_VERSION = "1.0.13"
 
 # Откуда лаунчер берёт обновления. Заполняется один раз (см. tools/publish_update.py):
 # "https://github.com/<владелец>/<репозиторий>/releases/latest/download/update.json"
@@ -59,6 +59,7 @@ DEFAULT_SETTINGS = {
     "download_threads": 16,
     "last_version": "",
     "last_account": "",
+    "lan_servers": [],            # адреса, добавленные вручную на вкладке «Сервера → Локальная сеть»
 }
 
 

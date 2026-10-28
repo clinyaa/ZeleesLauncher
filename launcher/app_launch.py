@@ -20,7 +20,7 @@ class LaunchMixin:
             return
         vid = self.selected_vid
         found = re.findall(r"\b1\.\d+(?:\.\d+)?\b", (st or {}).get("version") or "")
-        if len(set(found)) == 1 and found[0] in self.manifest.by_id and found[0] != vid:
+        if len(set(found)) == 1 and found[0] in self.manifest.by_id and found[0] != self._base_mc(vid):
             want = found[0]
             if not vid:
                 vid = want
@@ -39,6 +39,24 @@ class LaunchMixin:
         self.log("Подключение к серверу %s (%s%s)" % (entry["name"], host, ":%d" % port if port else ""))
         self.show_page("home")
         self._start(launch=True, server=(host, port))
+
+    def _base_mc(self, vid):
+        """Версия Minecraft, на которой стоит сборка (fabric-loader-…-1.21.4 -> 1.21.4)."""
+        import json
+        from .versions import version_json_path
+        root = self._game_root()
+        for _ in range(10):
+            if not vid or vid in self.manifest.by_id:
+                return vid
+            try:
+                with open(version_json_path(root, vid), "r", encoding="utf-8") as f:
+                    parent = json.load(f).get("inheritsFrom")
+            except (OSError, ValueError):
+                return vid
+            if not parent:
+                return vid
+            vid = parent
+        return vid
 
     # ------------------------------------------------------------------ установка / запуск
     def _set_busy(self, busy):

@@ -73,7 +73,8 @@ class VersionsMixin:
         for lv in local_versions(root):
             if lv["id"] in self.manifest.by_id:
                 continue
-            rows.append((lv["id"], "Модиф. / локальная", lv.get("releaseTime", ""), "local", lv.get("inheritsFrom")))
+            tname = "Сборка «%s»" % lv["name"] if lv.get("name") else "Модиф. / локальная"
+            rows.append((lv["id"], tname, lv.get("releaseTime", ""), "local", lv.get("inheritsFrom")))
         for v in self.manifest.versions:
             if not show.get(v["type"], False) and not only_inst:
                 continue

@@ -77,6 +77,8 @@ def local_versions(root):
                     "type": d.get("type", "release"),
                     "releaseTime": d.get("releaseTime", ""),
                     "inheritsFrom": d.get("inheritsFrom"),
+                    "name": d.get("zeleesName"),  # сборка, поставленная по коду
+                    "pack": d.get("zeleesPack"),
                 })
             except (OSError, ValueError):
                 pass

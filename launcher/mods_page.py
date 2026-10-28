@@ -8,7 +8,7 @@ import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor
 from tkinter import ttk, messagebox
 
-from . import loaders, mods, net
+from . import loaders, mods, net, packs
 from .installer import install_version
 from .launch import instance_dir
 from .ui_kit import C, PillButton, ScrollFrame, Switch, make_entry
@@ -57,13 +57,14 @@ class ModsPage:
         top.pack(fill="x")
         app._label(top, "Сборка", bold=True).pack(side="left")
         self.build_var = tk.StringVar()
-        self.build_box = ttk.Combobox(top, textvariable=self.build_var, state="readonly", width=46,
+        self.build_box = ttk.Combobox(top, textvariable=self.build_var, state="readonly", width=34,
                                       font=self.F.b(10))
         self.build_box.pack(side="left", padx=px(12))
         self.build_box.bind("<<ComboboxSelected>>", lambda e: self._build_selected())
-        app._btn(top, "+ Новая сборка", self._new_build, style="sel").pack(side="left")
-        app._btn(top, "Папка mods", self._open_mods).pack(side="right")
-        app._btn(top, "Играть в сборку", self._play_build, style="accent").pack(side="right", padx=px(8))
+        app._btn(top, "+ Новая", self._new_build, style="sel", padx=14).pack(side="left")
+        app._btn(top, "Сборка по коду", lambda: PackCodeDialog(self), padx=14).pack(side="left", padx=(px(8), 0))
+        app._btn(top, "Играть", self._play_build, style="accent", padx=16).pack(side="right")
+        app._btn(top, "Поделиться", self._share_build, padx=14).pack(side="right", padx=px(8))
 
         bar = tk.Frame(body, bg=C["bg"])
         bar.pack(fill="x", pady=(px(14), px(10)))
@@ -92,6 +93,7 @@ class ModsPage:
         self.inst_summary = app._label(self.inst_tools, "", muted=True)
         self.inst_summary.pack(side="left", padx=px(10))
         app._btn(self.inst_tools, "Проверить снова", self.refresh_installed, padx=14).pack(side="left")
+        app._btn(self.inst_tools, "Папка mods", self._open_mods, padx=14).pack(side="left", padx=(px(8), 0))
 
         self.list = ScrollFrame(body, bg=C["bg"])
         self.list.pack(fill="both", expand=True)
@@ -114,11 +116,11 @@ class ModsPage:
                 continue
             ld, lver, mc = loaders.detect(vd)
             if ld:
-                res.append((lv["id"], ld, lver, mc))
-        res.sort(key=lambda b: b[0])
+                res.append((lv["id"], ld, lver, mc, lv.get("name")))
+        res.sort(key=lambda b: (not b[4], (b[4] or b[0]).lower()))
         self.builds = res
-        self.build_box["values"] = ["%s %s  ·  Minecraft %s" % (loaders.LOADER_NAMES[b[1]], b[2], b[3])
-                                    for b in res]
+        self.build_box["values"] = [("%s  ·  %s %s" % (b[4], loaders.LOADER_NAMES[b[1]], b[3]) if b[4] else
+                                     "%s %s  ·  Minecraft %s" % (loaders.LOADER_NAMES[b[1]], b[2], b[3])) for b in res]
         want = select or (self.build[0] if self.build else None) or self.app.selected_vid
         idx = next((i for i, b in enumerate(res) if b[0] == want), 0 if res else -1)
         if idx >= 0:
@@ -153,6 +155,21 @@ class ModsPage:
         self.app.select_version(self.build[0])
         self.app.show_page("home")
         self.app._play_clicked()
+
+    def _share_build(self):
+        if not self.build:
+            messagebox.showinfo("Поделиться", "Сначала создайте сборку с загрузчиком и добавьте в неё моды.",
+                                parent=self.app.root)
+            return
+        if not self.build[2]:
+            messagebox.showinfo("Поделиться", "Не удалось определить версию загрузчика этой сборки — "
+                                "ей нельзя поделиться кодом.", parent=self.app.root)
+            return
+        if not self.app.current_ms_account():
+            self.app._account_menu()
+            self.app.status("Чтобы делиться сборками, войдите в аккаунт Microsoft", C["warn"])
+            return
+        ShareDialog(self)
 
     def _refresh_view(self):
         self.list.clear()
@@ -228,7 +245,7 @@ class ModsPage:
             self.list.clear()
         self._search_seq += 1
         seq = self._search_seq
-        _vid, ld, _lv, mc = self.build
+        _vid, ld, _lv, mc = self.build[:4]
         sort = {"Популярные": "downloads", "По запросу": "relevance", "Обновлённые": "updated",
                 "Новые": "newest"}[self.sort_var.get()]
         q = self.query_var.get().strip()
@@ -255,7 +272,7 @@ class ModsPage:
         for h in hits:
             self._hit_row(h)
         self.offset += len(hits)
-        _vid, ld, _lv, mc = self.build
+        _vid, ld, _lv, mc = self.build[:4]
         if not hits and self.offset == 0:
             self._set_status("Ничего не найдено для %s %s" % (loaders.LOADER_NAMES[ld], mc), C["warn"])
         else:
@@ -355,7 +372,7 @@ class ModsPage:
                 return
         btn._busy = True
         btn.config_pill(text="Загрузка…", style="disabled", image=self.A.icon("download"))
-        _vid, ld, _lv, mc = self.build
+        _vid, ld, _lv, mc = self.build[:4]
         prov = self.provider()
         folder = mods.ModFolder(self.mods_dir())
 
@@ -421,7 +438,7 @@ class ModsPage:
         if not self.build:
             return
         self.list.clear()
-        _vid, ld, _lv, mc = self.build
+        _vid, ld, _lv, mc = self.build[:4]
         self._set_status("Проверяю моды на совместимость с %s %s..." % (loaders.LOADER_NAMES[ld], mc))
         folder = mods.ModFolder(self.mods_dir())
 
@@ -442,7 +459,7 @@ class ModsPage:
         self.list.clear()
         self.checked = res
         self._update_installed_keys()
-        _vid, ld, _lv, mc = self.build
+        _vid, ld, _lv, mc = self.build[:4]
         if not res:
             tk.Label(self.list.inner, text="В этой сборке пока нет модов — загляните в «Каталог»", bg=C["bg"],
                      fg=C["muted"], font=self.F.b(11)).pack(pady=self.px(40))
@@ -543,7 +560,7 @@ class ModsPage:
         threading.Thread(target=work, daemon=True).start()
 
     def _install_missing(self, missing):
-        _vid, ld, _lv, mc = self.build
+        _vid, ld, _lv, mc = self.build[:4]
         folder = mods.ModFolder(self.mods_dir())
         self._set_status("Ищу и ставлю недостающие зависимости...")
 
@@ -579,6 +596,19 @@ class ModsPage:
             self.app.ui(self._set_status, msg, C["warn"] if failed else C["accent"])
             self.app.ui(self.refresh_installed)
         threading.Thread(target=work, daemon=True).start()
+
+
+def install_loader(app, settings, ld, mc, lv):
+    """Ставит загрузчик (для Forge/NeoForge — сначала Java и сам Minecraft). Возвращает id версии. В фоне."""
+    root = settings["game_dir"]
+    app.ui(app.status, "Создаю сборку %s %s для Minecraft %s..." % (loaders.LOADER_NAMES[ld], lv, mc))
+    java = None
+    if ld in ("forge", "neoforge"):
+        vdata = resolve_version(root, mc, app.manifest)
+        comp, major = required_java(vdata)
+        java = app._ensure_java(comp, major, settings)
+        install_version(vdata, root, root, settings.get("download_threads", 16), app.progress, app.cancel)
+    return loaders.install(ld, mc, lv, root, java.path if java else None, log=lambda s: app.ui(app.log, s))
 
 
 # =====================================================================================
@@ -677,16 +707,7 @@ class NewBuildDialog:
 
         def work():
             try:
-                root = settings["game_dir"]
-                app.ui(app.status, "Создаю сборку %s %s для Minecraft %s..." % (loaders.LOADER_NAMES[ld], lv, mc))
-                java = None
-                if ld in ("forge", "neoforge"):
-                    vdata = resolve_version(root, mc, app.manifest)
-                    comp, major = required_java(vdata)
-                    java = app._ensure_java(comp, major, settings)
-                    install_version(vdata, root, root, settings.get("download_threads", 16), app.progress, app.cancel)
-                vid = loaders.install(ld, mc, lv, root, java.path if java else None,
-                                      log=lambda s: app.ui(app.log, s))
+                vid = install_loader(app, settings, ld, mc, lv)
                 app.ui(app.log, "Сборка создана: %s" % vid)
                 app.ui(app._build_created, vid)
             except Exception as e:  # noqa: BLE001
@@ -695,3 +716,287 @@ class NewBuildDialog:
             finally:
                 app.ui(app._set_busy, False)
         app.bg(work)
+
+
+# =====================================================================================
+def _pack_summary(files):
+    n = {"mod": 0, "resourcepack": 0, "shader": 0}
+    for f in files:
+        n[f.get("kind", "mod")] = n.get(f.get("kind", "mod"), 0) + 1
+    parts = [t % n[k] for k, t in (("mod", "модов: %d"), ("resourcepack", "ресурс-паков: %d"),
+                                    ("shader", "шейдеров: %d")) if n[k]]
+    return ", ".join(parts) or "без модов"
+
+
+class ShareDialog:
+    """Код для текущей сборки: друг вставит его в «Сборка по коду» и получит такую же сборку."""
+
+    def __init__(self, page):
+        from .dialogs import Dialog
+        self.page, self.app = page, page.app
+        app, px = self.app, self.app.px
+        _vid, ld, lv, mc, name = page.build
+        self.build = page.build
+        self.files = None
+        d = Dialog(app, "Поделиться сборкой", "Поделиться сборкой", "друг вставит код и получит такую же сборку")
+        self.d = d
+        f = d.f
+        tk.Label(f, text="Название", bg=C["panel"], fg=C["fg"], font=app.F.b(10, "bold")).pack(anchor="w")
+        self.name_var = tk.StringVar(value=name or "%s %s" % (loaders.LOADER_NAMES[ld], mc))
+        ef, _e = make_entry(f, app.A, self.name_var, width=44, font=app.F.b(11))
+        ef.pack(fill="x", pady=(px(4), px(12)))
+        tk.Label(f, text="Minecraft %s  ·  %s %s" % (mc, loaders.LOADER_NAMES[ld], lv), bg=C["panel"],
+                 fg=C["muted"], font=app.F.b(9)).pack(anchor="w")
+        self.info = tk.Label(f, text="Проверяю моды, ресурс-паки и шейдеры...", bg=C["panel"], fg=C["muted"],
+                             font=app.F.b(9), wraplength=px(440), justify="left")
+        self.info.pack(anchor="w", pady=(px(8), 0))
+        self.result = tk.Frame(f, bg=C["panel"])
+        bf = tk.Frame(f, bg=C["panel"])
+        bf.pack(fill="x", side="bottom", pady=(px(16), 0))
+        self.ok = d.btn(bf, "Получить код", self._publish, "accent")
+        self.ok.config_pill(enabled=False)
+        self.ok.pack(side="right")
+        self.cancel_btn = d.btn(bf, "Отмена", d.destroy)
+        self.cancel_btn.pack(side="right", padx=px(8))
+        d.bind("<Escape>", lambda ev: d.destroy())
+        self.busy = True
+        d.center()
+        d.grab_set()
+        game_dir = os.path.dirname(page.mods_dir())
+
+        def work():
+            try:
+                res, err = packs.collect(game_dir), None
+            except Exception as ex:  # noqa: BLE001
+                res, err = None, ex
+            app.ui(self._collected, res, err)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _state(self, text, color=None):
+        if self.d.winfo_exists():
+            self.info.configure(text=text, fg=color or C["muted"])
+
+    def _collected(self, res, err):
+        if not self.d.winfo_exists():
+            return
+        self.busy = False
+        if err:
+            self._state("Не удалось проверить файлы сборки: %s" % err, C["err"])
+            return
+        self.files, skipped = res
+        text = "В код войдут: %s." % _pack_summary(self.files)
+        if skipped:
+            names = ", ".join(skipped[:6]) + (" и ещё %d" % (len(skipped) - 6) if len(skipped) > 6 else "")
+            text += "\nНе войдут (их нет на Modrinth, друг поставит их сам): " + names
+        text += "\nНастройки и миры в код не входят."
+        self._state(text, C["warn"] if skipped else C["muted"])
+        self.ok.config_pill(enabled=True)
+
+    def _publish(self):
+        if self.busy or self.files is None:
+            return
+        name = self.name_var.get().strip()
+        if not name or len(name) > 40:
+            self._state("Название: от 1 до 40 символов", C["err"])
+            return
+        _vid, ld, lv, mc, _n = self.build
+        pack = packs.make_pack(name, mc, ld, lv, self.files)
+        self.busy = True
+        self.ok.config_pill(enabled=False)
+        self._state("Получаю код на сайте ZeleesLauncher...")
+        self.app.ms_call(lambda acc: packs.publish(self.app.premium, acc, pack), self._published)
+
+    def _published(self, res, err):
+        if not self.d.winfo_exists():
+            return
+        self.busy = False
+        if err:
+            self.ok.config_pill(enabled=True)
+            self._state("Не удалось получить код: %s" % err, C["err"])
+            return
+        app, px = self.app, self.app.px
+        self.code, self.url = res["code"], res.get("url") or ""
+        self.ok.pack_forget()
+        self.cancel_btn.config_pill(text="Готово")
+        self.result.pack(fill="x", pady=(px(14), 0))
+        tk.Label(self.result, text=self.code, bg=C["panel"], fg=C["accent"], font=app.F.t(26)).pack(anchor="w")
+        tk.Label(self.result, text="Друг открывает «Моды» → «Сборка по коду» и вставляет код или ссылку",
+                 bg=C["panel"], fg=C["muted"], font=app.F.b(9)).pack(anchor="w", pady=(px(2), px(8)))
+        row = tk.Frame(self.result, bg=C["panel"])
+        row.pack(anchor="w")
+        self.d.btn(row, "Копировать код", lambda: self._copy(self.code), "accent").pack(side="left")
+        if self.url:
+            self.d.btn(row, "Копировать ссылку", lambda: self._copy(self.url)).pack(side="left", padx=px(8))
+        self._copy(self.code)
+        self.app.log("Код сборки «%s»: %s %s" % (self.name_var.get().strip(), self.code, self.url))
+
+    def _copy(self, text):
+        self.app.root.clipboard_clear()
+        self.app.root.clipboard_append(text)
+        self._state("Скопировано: %s" % text, C["accent"])
+
+
+# =====================================================================================
+class PackCodeDialog:
+    """Ввод кода сборки: показывает, что в ней, и ставит версию, загрузчик и все файлы."""
+
+    def __init__(self, page):
+        from .dialogs import Dialog
+        self.page, self.app = page, page.app
+        app, px = self.app, self.app.px
+        self.data = None
+        d = Dialog(app, "Сборка по коду", "Сборка по коду", "версия, загрузчик и моды поставятся сами")
+        self.d = d
+        f = d.f
+        tk.Label(f, text="Код или ссылка", bg=C["panel"], fg=C["fg"], font=app.F.b(10, "bold")).pack(anchor="w")
+        self.code_var = tk.StringVar()
+        try:
+            clip = packs.parse_code(app.root.clipboard_get())
+        except tk.TclError:
+            clip = None
+        if clip:
+            self.code_var.set(clip)
+        row = tk.Frame(f, bg=C["panel"])
+        row.pack(fill="x", pady=(px(4), px(10)))
+        ef, self.entry = make_entry(row, app.A, self.code_var, width=24, font=app.F.b(13))
+        ef.pack(side="left", fill="x", expand=True)
+        d.btn(row, "Найти", self._lookup, "sel").pack(side="left", padx=(px(8), 0))
+        self.entry.focus_set()
+        self.info = tk.Label(f, text="Например: K7QF-M2XA или https://zelees.link/p/K7QF-M2XA", bg=C["panel"],
+                             fg=C["dim"], font=app.F.b(9), wraplength=px(440), justify="left")
+        self.info.pack(anchor="w")
+        self.preview = tk.Frame(f, bg=C["panel2"], highlightthickness=1, highlightbackground=C["line"])
+        bf = tk.Frame(f, bg=C["panel"])
+        bf.pack(fill="x", side="bottom", pady=(px(16), 0))
+        self.ok = d.btn(bf, "Установить", self._install, "accent")
+        self.ok.config_pill(enabled=False)
+        self.ok.pack(side="right")
+        d.btn(bf, "Отмена", d.destroy).pack(side="right", padx=px(8))
+        d.bind("<Return>", lambda ev: self._install() if self.data else self._lookup())
+        d.bind("<Escape>", lambda ev: d.destroy())
+        self.code_var.trace_add("write", lambda *a: self._code_changed())
+        d.center()
+        d.grab_set()
+        if clip:
+            self._lookup()
+
+    def _state(self, text, color=None):
+        if self.d.winfo_exists():
+            self.info.configure(text=text, fg=color or C["muted"])
+
+    def _code_changed(self):
+        if self.data and packs.parse_code(self.code_var.get()) != self.data["code"]:
+            self.data = None
+            self.ok.config_pill(enabled=False)
+            self.preview.pack_forget()
+
+    def _lookup(self):
+        code = packs.parse_code(self.code_var.get())
+        if not code:
+            self._state("Код — это 8 букв и цифр, например K7QF-M2XA", C["err"])
+            return
+        self._state("Ищу сборку %s..." % code)
+
+        def work():
+            try:
+                res, err = packs.fetch(code), None
+            except Exception as ex:  # noqa: BLE001
+                res, err = None, ex
+            self.app.ui(self._found, code, res, err)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _found(self, code, res, err):
+        if not self.d.winfo_exists() or packs.parse_code(self.code_var.get()) != code:
+            return
+        if err:
+            self._state(str(err), C["err"])
+            return
+        self.data = res
+        pk = res["pack"]
+        app, px = self.app, self.app.px
+        for w in self.preview.winfo_children():
+            w.destroy()
+        self.preview.pack(fill="x", pady=(px(12), 0))
+        inner = tk.Frame(self.preview, bg=C["panel2"])
+        inner.pack(fill="x", padx=px(14), pady=px(12))
+        tk.Label(inner, text=res["name"], bg=C["panel2"], fg=C["fg"], font=app.F.b(13, "bold")).pack(anchor="w")
+        tk.Label(inner, text="Minecraft %s  ·  %s %s" % (pk["mc"], loaders.LOADER_NAMES.get(pk["loader"], pk["loader"]),
+                                                         pk["loader_version"]),
+                 bg=C["panel2"], fg=C["muted"], font=app.F.b(10)).pack(anchor="w", pady=(px(2), 0))
+        meta = _pack_summary(pk["files"])
+        if res.get("author"):
+            meta += "   ·   автор: " + res["author"]
+        tk.Label(inner, text=meta, bg=C["panel2"], fg=C["muted"], font=app.F.b(9)).pack(anchor="w")
+        note = "Будет создана отдельная сборка со своей папкой — ваши другие сборки и миры не изменятся."
+        if any(f["source"] == "curseforge" for f in pk["files"]) and not (
+                app.settings.get("curseforge_key") or "").strip():
+            note += "\nВ сборке есть моды с CurseForge: без API-ключа CurseForge («Опции») они не скачаются."
+        self._state(note)
+        self.ok.config_pill(enabled=True)
+
+    def _install(self):
+        if not self.data:
+            return
+        app = self.app
+        if app.busy:
+            self._state("Подождите — лаунчер уже занят", C["warn"])
+            return
+        data = self.data
+        try:
+            settings = app._collect_settings()
+        except ValueError as e:
+            self._state(str(e), C["err"])
+            return
+        self.d.destroy()
+        app.show_page("home")
+        app._set_busy(True)
+
+        def work():
+            pk = data["pack"]
+            root = settings["game_dir"]
+            vid = None
+            try:
+                ld, lv, mc = pk["loader"], pk["loader_version"], pk["mc"]
+                parent = packs.find_loader_version(root, app.manifest, ld, lv, mc)
+                if not parent:
+                    parent = install_loader(app, settings, ld, mc, lv)
+                app.ui(app.status, "Сборка «%s»: получаю список файлов..." % data["name"])
+                items, failed = packs.resolve_files(pk, (settings.get("curseforge_key") or "").strip())
+                vid = packs.create_pack_version(root, app.manifest, data["name"], data["code"], parent)
+                game_dir = instance_dir(settings, root, vid)
+                packs.install_files(game_dir, items, settings.get("download_threads", 16), app.progress, app.cancel)
+                app.ui(app.log, "Сборка «%s» (%s) установлена: %s, файлов: %d" % (
+                    data["name"], data["code"], vid, len(items)))
+                for what, why in failed:
+                    app.ui(app.log, "Не скачано: %s — %s" % (what, why), "WARN")
+                app.ui(self._done, vid, data["name"], failed)
+            except net.Cancelled:
+                self._cleanup(root, vid)
+                app.ui(app.status, "Отменено", C["warn"])
+            except Exception as e:  # noqa: BLE001
+                self._cleanup(root, vid)
+                app.ui(app.log, traceback.format_exc(), "ERROR")
+                app.ui(app._error, e)
+            finally:
+                app.ui(app._set_busy, False)
+        app.bg(work)
+
+    @staticmethod
+    def _cleanup(root, vid):
+        """Недоустановленная сборка не должна остаться в списке."""
+        if not vid:
+            return
+        import shutil
+        loaders.remove_version(root, vid)
+        shutil.rmtree(os.path.join(root, "instances", vid), ignore_errors=True)
+
+    def _done(self, vid, name, failed):
+        app = self.app
+        app._build_created(vid)
+        app.status("Сборка «%s» готова — нажмите «Играть»" % name, C["accent"])
+        if failed:
+            lines = "\n".join("• %s — %s" % fw for fw in failed[:12])
+            if len(failed) > 12:
+                lines += "\n… и ещё %d" % (len(failed) - 12)
+            messagebox.showwarning("Сборка по коду", "Сборка установлена, но часть файлов скачать не удалось:\n\n"
+                                   + lines, parent=app.root)

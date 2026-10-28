@@ -1,4 +1,5 @@
-"""Вкладка «Сервера» (сервера игроков с Premium: пинг, онлайн, быстрый вход) и окно Premium."""
+"""Вкладка «Сервера» (сервера игроков с Premium и сервера в локальной сети: пинг, онлайн, быстрый вход)
+и окно Premium."""
 import base64
 import threading
 import time
@@ -7,7 +8,7 @@ import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor
 from tkinter import messagebox
 
-from . import mc_status
+from . import lan, mc_status
 from .ui_kit import C, PillButton, ScrollFrame, make_entry
 
 LETTER_COLORS = ["#2f6b45", "#6b4a2f", "#2f4f6b", "#5a2f6b", "#6b2f3f", "#4f6b2f"]
@@ -42,19 +43,49 @@ class ServersPage:
         self.loaded_at = 0
         self.seq = 0
         self.pool = ThreadPoolExecutor(max_workers=8)
+        self.mode = "public"
+        # локальная сеть
+        self.lan = lan.LanListener(on_change=lambda: self.app.ui(self._lan_changed))
+        self.lan_found = {}    # (ip, port) -> запись, найденная поиском выделенных серверов
+        self.lan_results = {}  # (ip, port) -> ответ пинга
+        self.lan_rows = {}
+        self.lan_shown = None  # ключи, которые сейчас нарисованы
+        self.lan_scanning = False
+        self.lan_addr_var = tk.StringVar()
+        self.my_ips = set()
         self._build_ui()
 
     # ------------------------------------------------------------------ разметка
     def _build_ui(self):
         app, px = self.app, self.px
-        body = app._page("servers", "Сервера", "Сервера игроков ZeleesLauncher — пинг, онлайн и вход в игру в один клик")
-        top = tk.Frame(body, bg=C["bg"])
-        top.pack(fill="x", pady=(0, px(12)))
-        self.add_btn = app._btn(top, "+ Добавить свой сервер", self._add_clicked, style="sel")
+        body = app._page("servers", "Сервера", "Сервера игроков ZeleesLauncher и миры в вашей локальной сети — "
+                                               "пинг, онлайн и вход в игру в один клик")
+        bar = tk.Frame(body, bg=C["bg"])
+        bar.pack(fill="x", pady=(0, px(10)))
+        self.tab_pub = app._btn(bar, "Сервера игроков", lambda: self._set_mode("public"), style="sel", padx=16)
+        self.tab_pub.pack(side="left")
+        self.tab_lan = app._btn(bar, "Локальная сеть", lambda: self._set_mode("lan"), padx=16)
+        self.tab_lan.pack(side="left", padx=(px(8), 0))
+        self.summary = app._label(bar, "", muted=True)
+        self.summary.pack(side="right")
+
+        self.tools_slot = tk.Frame(body, bg=C["bg"])
+        self.tools_slot.pack(fill="x", pady=(0, px(12)))
+        self.pub_tools = tk.Frame(self.tools_slot, bg=C["bg"])
+        self.add_btn = app._btn(self.pub_tools, "+ Добавить свой сервер", self._add_clicked, style="sel")
         self.add_btn.pack(side="left")
-        app._btn(top, "Обновить", self.reload, padx=14).pack(side="right")
-        self.summary = app._label(top, "", muted=True)
-        self.summary.pack(side="right", padx=px(12))
+        app._btn(self.pub_tools, "Обновить", self.reload, padx=14).pack(side="right")
+
+        self.lan_tools = tk.Frame(self.tools_slot, bg=C["bg"])
+        ef, self.lan_entry = make_entry(self.lan_tools, self.A, self.lan_addr_var, width=24, font=self.F.b(10))
+        ef.pack(side="left")
+        self.lan_entry.bind("<Return>", lambda e: self._lan_add_address())
+        app._btn(self.lan_tools, "Добавить адрес", self._lan_add_address, padx=14).pack(side="left", padx=px(8))
+        self.scan_btn = app._btn(self.lan_tools, "Найти выделенные сервера", self._lan_scan, padx=14)
+        self.scan_btn.pack(side="right")
+
+        self.pub_tools.pack(fill="x")
+
         self.list = ScrollFrame(body, bg=C["bg"])
         self.list.pack(fill="both", expand=True)
         self.status = app._label(body, "", muted=True, size=9, anchor="w")
@@ -62,7 +93,33 @@ class ServersPage:
 
     def on_show(self):
         self.on_premium_changed()
-        if time.time() - self.loaded_at > 60:
+        if self.mode == "lan":
+            self._lan_render(force=True)
+        elif time.time() - self.loaded_at > 60:
+            self.reload()
+
+    def _set_mode(self, mode):
+        if mode == self.mode:
+            return
+        self.mode = mode
+        self.tab_pub.config_pill(style="sel" if mode == "public" else "dark")
+        self.tab_lan.config_pill(style="sel" if mode == "lan" else "dark")
+        for w in (self.pub_tools, self.lan_tools):
+            w.pack_forget()
+        (self.lan_tools if mode == "lan" else self.pub_tools).pack(fill="x")
+        self.list.clear()
+        self.rows = {}
+        self.lan_rows = {}
+        self.lan_shown = None
+        self.seq += 1  # ответы, пришедшие для прошлого режима, больше не нужны
+        if mode == "lan":
+            if not self.lan._started:
+                self.app.root.after(10000, self._lan_tick)
+            self.lan.start()
+            self.my_ips = set(lan.local_ipv4())
+            self._lan_render(force=True)
+        else:
+            self.loaded_at = 0
             self.reload()
 
     def on_premium_changed(self):
@@ -224,6 +281,220 @@ class ServersPage:
         if ok:
             text += "   ·   игроков онлайн: %d" % sum(r["online"] for r in ok)
         self.summary.configure(text=text)
+
+    # ------------------------------------------------------------------ локальная сеть
+    def _lan_entries(self):
+        """LAN-миры (объявления), найденные поиском и добавленные вручную — без повторов."""
+        res, seen = [], set()
+        for e in self.lan.servers():
+            res.append(e)
+            seen.add((e["address"], e["port"]))
+        for e in list(self.lan_found.values()) + [dict(x, kind="manual") for x in self._saved_lan()]:
+            k = (e["address"], e["port"])
+            if k not in seen:
+                seen.add(k)
+                res.append(e)
+        return res
+
+    def _saved_lan(self):
+        v = self.app.settings.get("lan_servers")
+        return [x for x in v if isinstance(x, dict) and x.get("address")] if isinstance(v, list) else []
+
+    def _lan_changed(self):
+        n = len(self.lan.servers())
+        self.tab_lan.config_pill(text="Локальная сеть · %d" % n if n else "Локальная сеть")
+        if self.mode == "lan" and self.app.page == "servers":
+            self._lan_render()
+
+    def _lan_render(self, force=False):
+        entries = self._lan_entries()
+        keys = [(e["address"], e["port"], e.get("motd")) for e in entries]
+        if not force and keys == self.lan_shown:
+            return
+        self.lan_shown = keys
+        self.list.clear()
+        self.lan_rows = {}
+        self.seq += 1
+        seq = self.seq
+        if not entries:
+            self._lan_empty_state()
+        for e in entries:
+            k = (e["address"], e["port"])
+            self._lan_row(e)
+            if k in self.lan_results:
+                self._lan_apply(seq, e, self.lan_results[k])
+            if force or k not in self.lan_results:
+                self.pool.submit(self._lan_ping, seq, e)
+        self._lan_summary()
+        if self.lan.error:
+            self._set_status("Поиск LAN-миров не работает: %s" % self.lan.error, C["err"])
+        else:
+            self._set_status("Миры, открытые через «Открыть для сети», появляются здесь сами. Если Windows "
+                             "спросит про доступ к сети — разрешите его для частных сетей.")
+
+    def _lan_empty_state(self):
+        px = self.px
+        card = tk.Frame(self.list.inner, bg=C["panel"], highlightthickness=1, highlightbackground=C["line"])
+        card.pack(fill="x", pady=px(20), padx=(0, px(8)))
+        tk.Label(card, image=self.A.icon("servers", "_on"), bg=C["panel"]).pack(pady=(px(28), px(10)))
+        tk.Label(card, text="Ищу миры в локальной сети…", bg=C["panel"], fg=C["fg"], font=self.F.t(15)).pack()
+        for text in ("Друг в той же сети (Wi-Fi, кабель, Radmin VPN, Hamachi) открывает мир: Esc → «Открыть для сети».",
+                     "Мир появится здесь через пару секунд — останется нажать «Играть».",
+                     "Свой сервер (server.jar) найдёт кнопка «Найти выделенные сервера» или добавьте его адрес."):
+            tk.Label(card, text=text, bg=C["panel"], fg=C["muted"], font=self.F.b(10)).pack(pady=(px(4), 0))
+        tk.Frame(card, bg=C["panel"], height=px(24)).pack()
+
+    def _lan_row(self, e):
+        px = self.px
+        k = (e["address"], e["port"])
+        name = e.get("motd") or e.get("name") or e["address"]
+        row = tk.Frame(self.list.inner, bg=C["panel"], highlightthickness=1, highlightbackground=C["line"])
+        row.pack(fill="x", pady=(0, px(8)), padx=(0, px(8)))
+        r = tk.Frame(row, bg=C["panel"])
+        r.pack(fill="x", padx=px(14), pady=px(12))
+        icon = self._icon(r, {"name": name}, C["panel"])
+        icon.pack(side="left", anchor="n")
+
+        right = tk.Frame(r, bg=C["panel"])
+        right.pack(side="right")
+        stats = tk.Frame(right, bg=C["panel"])
+        stats.pack(side="left", padx=(0, px(14)))
+        online = tk.Label(stats, text="…", bg=C["panel"], fg=C["muted"], font=self.F.b(10, "bold"), anchor="e")
+        online.pack(anchor="e")
+        ping = tk.Label(stats, text="пинг…", bg=C["panel"], fg=C["dim"], font=self.F.b(9), anchor="e")
+        ping.pack(anchor="e")
+        PillButton(right, self.A, "Играть", command=lambda: self._lan_play(e), style="accent",
+                   font=self.F.b(10, "bold"), bg=C["panel"], minw=110).pack(side="left")
+
+        mid = tk.Frame(r, bg=C["panel"])
+        mid.pack(side="left", fill="x", expand=True, padx=px(14))
+        t = tk.Frame(mid, bg=C["panel"])
+        t.pack(fill="x")
+        tk.Label(t, text=name, bg=C["panel"], fg=C["fg"], font=self.F.b(12, "bold")).pack(side="left")
+        kind = {"lan": "LAN-мир", "scan": "выделенный сервер", "manual": "добавлен вручную"}.get(e.get("kind"), "")
+        if e["address"] in self.my_ips or e["address"].startswith("127."):
+            kind += " · на этом компьютере"
+        tk.Label(t, text="  " + kind, bg=C["panel"], fg=C["accent"] if e.get("kind") == "lan" else C["muted"],
+                 font=self.F.b(9, "bold")).pack(side="left")
+        if e.get("kind") == "manual":
+            lb = tk.Label(t, text="Убрать", bg=C["panel"], fg=C["muted"], font=self.F.b(9, "underline"), cursor="hand2")
+            lb.pack(side="right")
+            lb.bind("<Button-1>", lambda ev: self._lan_remove(e))
+        desc = tk.Label(mid, text="", bg=C["panel"], fg="#b5bac4", font=self.F.b(9), anchor="w", justify="left",
+                        wraplength=px(520))
+        desc.pack(fill="x")
+        meta = tk.Label(mid, text="%s:%d" % k, bg=C["panel"], fg=C["dim"], font=self.F.b(8), anchor="w")
+        meta.pack(fill="x", pady=(px(2), 0))
+        self.lan_rows[k] = dict(icon=icon, online=online, ping=ping, desc=desc, meta=meta)
+
+    def _lan_tick(self):
+        """Пока вкладка открыта, онлайн и пинг обновляются каждые 10 секунд."""
+        if self.mode == "lan" and self.app.page == "servers":
+            for e in self._lan_entries():
+                self.pool.submit(self._lan_ping, self.seq, e)
+        self.app.root.after(10000, self._lan_tick)
+
+    def _lan_ping(self, seq, e):
+        try:
+            res = mc_status.ping(e["address"], e["port"], timeout=2.5, allow_private=True)
+        except mc_status.PingError as ex:
+            res = {"error": str(ex)}
+        except Exception as ex:  # noqa: BLE001
+            res = {"error": "ошибка: %s" % ex}
+        self.app.ui(self._lan_apply, seq, e, res)
+
+    def _lan_apply(self, seq, e, res):
+        k = (e["address"], e["port"])
+        self.lan_results[k] = res
+        w = self.lan_rows.get(k)
+        if seq != self.seq or self.mode != "lan" or not w or not w["online"].winfo_exists():
+            return
+        if "error" in res:
+            w["online"].configure(text="● не отвечает", fg=C["err"])
+            w["ping"].configure(text=res["error"], fg=C["dim"])
+            w["meta"].configure(text="%s:%d" % k)
+        else:
+            w["online"].configure(text="● %d / %d" % (res["online"], res["max"]), fg=C["accent"])
+            w["ping"].configure(text="%d мс" % res["ping"], fg=ping_color(res["ping"]))
+            w["meta"].configure(text="%s:%d" % k + ("   ·   " + res["version"] if res["version"] else ""))
+            if res["motd"] and res["motd"] != e.get("motd"):
+                w["desc"].configure(text=res["motd"])
+            if res.get("favicon"):
+                self._set_favicon(w["icon"], res["favicon"])
+        self._lan_summary()
+
+    def _lan_summary(self):
+        if self.mode != "lan":
+            return
+        keys = [(e["address"], e["port"]) for e in self._lan_entries()]
+        ok = [self.lan_results[k] for k in keys if "error" not in self.lan_results.get(k, {"error": 1})]
+        text = "В сети: %d" % len(keys) if keys else ""
+        if ok:
+            text += "   ·   игроков онлайн: %d" % sum(r["online"] for r in ok)
+        self.summary.configure(text=text)
+
+    def _lan_play(self, e):
+        k = (e["address"], e["port"])
+        entry = {"name": e.get("motd") or e.get("name") or e["address"], "address": e["address"], "port": e["port"]}
+        self.app.play_on_server(entry, self.lan_results.get(k))
+
+    def _lan_add_address(self):
+        text = self.lan_addr_var.get().strip()
+        if not text:
+            self.lan_entry.focus_set()
+            self._set_status("Введите адрес сервера: 192.168.1.5 или 192.168.1.5:25566", C["warn"])
+            return
+        try:
+            host, port = mc_status.parse_address(text)
+        except ValueError as ex:
+            self._set_status(str(ex), C["err"])
+            return
+        port = port or mc_status.DEFAULT_PORT
+        saved = [x for x in self._saved_lan() if (x["address"], x["port"]) != (host, port)]
+        saved.append({"address": host, "port": port, "name": host})
+        self.app.settings.set("lan_servers", saved[-20:])
+        self.lan_addr_var.set("")
+        self.lan_results.pop((host, port), None)
+        self._lan_render(force=True)
+
+    def _lan_remove(self, e):
+        saved = [x for x in self._saved_lan() if (x["address"], x["port"]) != (e["address"], e["port"])]
+        self.app.settings.set("lan_servers", saved)
+        self._lan_render(force=True)
+
+    def _lan_scan(self):
+        if self.lan_scanning:
+            return
+        self.lan_scanning = True
+        self.scan_btn.config_pill(text="Ищу…", style="disabled")
+        self._set_status("Проверяю порт 25565 на всех компьютерах вашей локальной сети...")
+
+        def work():
+            try:
+                ips = lan.scan_subnets()
+            except Exception as ex:  # noqa: BLE001
+                ips, err = [], ex
+            else:
+                err = None
+            self.app.ui(self._lan_scanned, ips, err)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _lan_scanned(self, ips, err):
+        self.lan_scanning = False
+        self.scan_btn.config_pill(text="Найти выделенные сервера", style="dark")
+        for ip in ips:
+            self.lan_found[(ip, mc_status.DEFAULT_PORT)] = {"address": ip, "port": mc_status.DEFAULT_PORT,
+                                                            "name": ip, "kind": "scan"}
+        if self.mode != "lan":
+            return
+        self._lan_render(force=True)
+        if err:
+            self._set_status("Поиск не удался: %s" % err, C["err"])
+        elif ips:
+            self._set_status("Найдено серверов на порту 25565: %d" % len(ips), C["accent"])
+        else:
+            self._set_status("В локальной сети не найдено серверов на порту 25565. Если у сервера другой порт — "
+                             "добавьте адрес вручную.", C["warn"])
 
     # ------------------------------------------------------------------ действия
     def _play(self, e):

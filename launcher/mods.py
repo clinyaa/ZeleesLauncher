@@ -96,6 +96,16 @@ class Modrinth:
     def version(self, version_id):
         return self._to_file(self._get("/version/%s" % version_id))
 
+    def versions(self, ids):
+        """version_id -> файл; несуществующие версии в ответ не попадают."""
+        ids, res = list(ids), {}
+        for i in range(0, len(ids), 100):
+            for v in self._get("/versions", {"ids": json.dumps(ids[i:i + 100])}):
+                mf = self._to_file(v)
+                if mf:
+                    res[v["id"]] = mf
+        return res
+
     def project(self, pid):
         p = self._get("/project/%s" % pid)
         return {"source": self.key, "id": p["id"], "slug": p.get("slug"), "title": p.get("title"),
@@ -188,6 +198,21 @@ class CurseForge:
         files.sort(key=lambda f: f.get("fileDate", ""), reverse=True)
         files.sort(key=lambda f: f.get("releaseType", 1))
         return self._to_file(files[0], project_id)
+
+    def files(self, ids):
+        """file_id -> файл (по id файлов CurseForge, одним запросом)."""
+        ids, res = [int(x) for x in ids], {}
+        for i in range(0, len(ids), 100):
+            try:
+                r = net.post_json(CURSEFORGE + "/mods/files", {"fileIds": ids[i:i + 100]},
+                                  headers={"x-api-key": self.api_key}, timeout=20)
+            except net.HttpError as e:
+                if e.status in (401, 403):
+                    raise ModsError("CurseForge отклонил API-ключ. Проверьте его в настройках.")
+                raise
+            for f in r.get("data", []):
+                res[str(f["id"])] = self._to_file(f, f.get("modId"))
+        return res
 
     def project(self, pid):
         m = self._get("/mods/%s" % pid).get("data", {})
@@ -638,7 +663,9 @@ def check_folder(folder, mc, loader, online=True):
             for pid, _vid, dtype in v.get("deps", []):
                 if dtype == "required" and pid and pid not in mr_projects:
                     missing.append({"name": pid, "pid": pid})
-        if meta and e["enabled"] and not missing:
+        # зависимости из jar — только для модов не с Modrinth: у Modrinth-модов список точнее (в jar видны
+        # и модули внутри Fabric API, которых нет среди установленных файлов)
+        if meta and e["enabled"] and not v:
             missing = [{"name": d, "pid": None} for d in meta.get("deps", []) if d not in all_ids]
         u = upd.get(h)
         update = u if (u and v and u["version_id"] != v["version_id"]) else None
