@@ -597,6 +597,8 @@ class ModsPage:
         order = {"bad": 0, "unknown": 2, "ok": 3}
         res = sorted(res, key=lambda r: (not r["enabled"], 1 if r["missing"] else order[r["status"]],
                                          r["title"].lower()))
+        if upd:
+            self._update_all_banner([r for r in res if r["update"]])
         for r in res:
             self._installed_row(r)
         self._set_status("Проверено для %s %s. Отключённые моды не загружаются игрой." % (
@@ -664,16 +666,59 @@ class ModsPage:
 
         def work():
             try:
-                folder.install(mf, r["title"], r.get("icon_url"))
-                old = os.path.join(folder.path, r["file"])
-                if os.path.basename(old) != mf["filename"] and os.path.exists(old):
-                    folder.delete(r["file"])
+                folder.update(r["file"], mf, r["title"], r.get("icon_url"))
                 self.app.ui(self.app.log, "Мод обновлён: %s → %s" % (r["title"], mf["version_number"]))
             except Exception as e:  # noqa: BLE001
                 self.app.ui(self._set_status, "Ошибка обновления: %s" % e, C["err"])
                 return
             self.app.ui(self.refresh_installed)
         threading.Thread(target=work, daemon=True).start()
+
+    def _update_all_banner(self, rows):
+        px = self.px
+        card = tk.Frame(self.list.inner, bg=C["panel2"], highlightthickness=1, highlightbackground=C["accent_d"])
+        card.pack(fill="x", pady=(0, px(8)), padx=(0, px(8)))
+        inner = tk.Frame(card, bg=C["panel2"])
+        inner.pack(fill="x", padx=px(14), pady=px(10))
+        names = ", ".join(r["title"] for r in rows[:4]) + (" и ещё %d" % (len(rows) - 4) if len(rows) > 4 else "")
+        tk.Label(inner, text="Доступны обновления: %d" % len(rows), bg=C["panel2"], fg=C["fg"],
+                 font=self.F.b(11, "bold")).pack(side="left")
+        tk.Label(inner, text="   " + names, bg=C["panel2"], fg=C["muted"], font=self.F.b(9)).pack(side="left")
+        self.update_all_btn = PillButton(inner, self.A, "Обновить все", command=lambda: self._update_all(rows),
+                                         style="accent", size="sm", font=self.F.b(10, "bold"), bg=C["panel2"])
+        self.update_all_btn.pack(side="right")
+
+    def _update_all(self, rows):
+        """Обновляет моды по очереди; ошибки не останавливают остальные."""
+        if getattr(self, "_updating", False):
+            return
+        self._updating = True
+        self.update_all_btn.config_pill(text="Обновляю…", enabled=False)
+        folder = mods.ModFolder(self.mods_dir())
+
+        def work():
+            failed = []
+            for i, r in enumerate(rows, 1):
+                self.app.ui(self._set_status, "Обновляю %d из %d: «%s»..." % (i, len(rows), r["title"]))
+                try:
+                    folder.update(r["file"], r["update"], r["title"], r.get("icon_url"), cancel=self.app.cancel)
+                    self.app.ui(self.app.log, "Мод обновлён: %s → %s" % (r["title"], r["update"]["version_number"]))
+                except net.Cancelled:
+                    break
+                except Exception as e:  # noqa: BLE001
+                    failed.append("%s (%s)" % (r["title"], e))
+                    self.app.ui(self.app.log, "Не удалось обновить %s: %s" % (r["title"], e), "WARN")
+            self.app.ui(self._update_all_done, len(rows), failed)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _update_all_done(self, total, failed):
+        self._updating = False
+        self.refresh_installed()
+        if failed:
+            self._set_status("Обновлено %d из %d. Не получилось: %s" % (total - len(failed), total, "; ".join(failed)),
+                             C["warn"])
+        else:
+            self._set_status("✓  Обновлено модов: %d" % total, C["accent"])
 
     def _install_missing(self, missing):
         _vid, ld, _lv, mc = self.build[:4]

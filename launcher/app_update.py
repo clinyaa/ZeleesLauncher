@@ -41,6 +41,7 @@ class UpdateMixin:
             beta = " (бета)" if m.get("channel") == "beta" else ""
             self.upd_pill.config(text="Доступно обновление %s%s" % (m["version"], beta))
             self.upd_pill.set_visible(True)
+            self._layout_top()
             if manual:
                 self._update_clicked()
         elif manual:
@@ -76,6 +77,7 @@ class UpdateMixin:
             self._on_close()
             return
         self.upd_pill.set_visible(False)
+        self._layout_top()
         self.status("Обновление %s готово" % ver, C["accent"])
         if messagebox.askyesno(APP_NAME, "Обновление %s скачано. Перезапустить лаунчер сейчас?" % ver,
                                parent=self.root):

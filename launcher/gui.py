@@ -346,6 +346,7 @@ def run():
     sys._zelees_started = True  # окно открылось — обновление (если было) рабочее
     root.after(3000, app._check_updates)
     root.after(4000, app.reporter.check_startup_crash)
+    root.after(1000, app._load_news)
     server = None
     try:
         server = fileopen.Server(lambda p: app.ui(app.open_file, p))

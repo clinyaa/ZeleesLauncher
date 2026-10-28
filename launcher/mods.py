@@ -562,6 +562,19 @@ class ModFolder:
         self.save_index()
         return dest
 
+    def update(self, old_file, mf, title=None, icon_url=None, cancel=None):
+        """Ставит новую версию мода вместо old_file. Отключённый мод остаётся отключённым."""
+        was_disabled = old_file.endswith(".disabled")
+        self.install(mf, title, icon_url, cancel)
+        old = os.path.join(self.path, old_file)
+        if old_file != mf["filename"] and os.path.exists(old):
+            os.remove(old)
+            if self.base_name(old_file) != mf["filename"]:
+                self.index.pop(self.base_name(old_file), None)
+                self.save_index()
+        if was_disabled:
+            self.toggle(mf["filename"])
+
     def delete(self, fn):
         try:
             os.remove(os.path.join(self.path, fn))

@@ -5,6 +5,7 @@ import shutil
 import tempfile
 import unittest
 import zipfile
+from unittest import mock
 
 from launcher import mods
 
@@ -88,6 +89,59 @@ class JarMetaTest(unittest.TestCase):
         with open(bad, "wb") as f:
             f.write(b"not a zip")
         self.assertIsNone(mods.read_jar_meta(bad))
+
+
+class ModFolderUpdateTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.folder = mods.ModFolder(self.dir)
+
+    def put(self, fn, project="P1", indexed=True):
+        with open(os.path.join(self.dir, fn), "wb") as f:
+            f.write(b"old")
+        if indexed:
+            self.folder.index[mods.ModFolder.base_name(fn)] = {"source": "modrinth", "project_id": project,
+                                                               "version_id": "v1", "title": "Mod"}
+            self.folder.save_index()
+
+    def update(self, old_file, new_name):
+        mf = {"source": "modrinth", "project_id": "P1", "version_id": "v2", "version_number": "2.0",
+              "filename": new_name, "url": "https://cdn.modrinth.com/x/" + new_name, "sha1": None}
+
+        def fake_download(url, dest, sha1=None, cancel=None):
+            with open(dest, "wb") as f:
+                f.write(b"new")
+        with mock.patch.object(mods.net, "download", side_effect=fake_download):
+            self.folder.update(old_file, mf, "Mod")
+
+    def files(self):
+        return sorted(f for f in os.listdir(self.dir) if not f.startswith("."))
+
+    def test_enabled_mod(self):
+        self.put("mod-1.0.jar")
+        self.update("mod-1.0.jar", "mod-2.0.jar")
+        self.assertEqual(self.files(), ["mod-2.0.jar"])
+        self.assertEqual(self.folder.index["mod-2.0.jar"]["version_id"], "v2")
+        self.assertNotIn("mod-1.0.jar", self.folder.index)
+
+    def test_disabled_mod_stays_disabled(self):
+        self.put("mod-1.0.jar.disabled")
+        self.update("mod-1.0.jar.disabled", "mod-2.0.jar")
+        self.assertEqual(self.files(), ["mod-2.0.jar.disabled"])
+        self.assertIn("mod-2.0.jar", self.folder.index)
+
+    def test_same_file_name(self):
+        self.put("mod.jar.disabled")
+        self.update("mod.jar.disabled", "mod.jar")
+        self.assertEqual(self.files(), ["mod.jar.disabled"])
+        with open(os.path.join(self.dir, "mod.jar.disabled"), "rb") as f:
+            self.assertEqual(f.read(), b"new")
+
+    def test_mod_downloaded_by_hand(self):
+        self.put("handmade-1.0.jar", indexed=False)  # найден на Modrinth по хэшу, в индексе его нет
+        self.update("handmade-1.0.jar", "handmade-2.0.jar")
+        self.assertEqual(self.files(), ["handmade-2.0.jar"])
 
 
 class CompatTest(unittest.TestCase):

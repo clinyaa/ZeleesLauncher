@@ -1,11 +1,14 @@
 """Страницы окна: главная, версии, Java, настройки, консоль (вёрстка)."""
 import os
+import threading
+import webbrowser
 import tkinter as tk
 from tkinter import ttk
 
+from . import news
 from .app_util import fmt_date, hero_kind, open_path, spaced, total_ram_mb
 from .config import APP_NAME, APP_VERSION, DATA_DIR
-from .ui_kit import C, CPill, GoldBadge, Slider, Switch, make_entry
+from .ui_kit import C, CPill, GoldBadge, PillButton, ScrollFrame, Slider, Switch, make_entry
 from .versions import TYPE_NAMES, is_installed
 
 class PagesMixin:
@@ -27,6 +30,12 @@ class PagesMixin:
                               command=self._update_clicked, font=self.F.b(10, "bold"),
                               image=A.icon("download", "_on"), padx=14)
         self.upd_pill.set_visible(False)
+
+        # новости (скрыты, пока их нет); встают правее плашки обновления, если она видна
+        self.news = []
+        self.news_pill = CPill(cv, A, L, px(24), "Новости", size="md", style="glass", command=self.open_news,
+                               font=self.F.b(10, "bold"), fg="#ffffff", padx=14)
+        self.news_pill.set_visible(False)
 
         # аккаунт
         self.acc_pill = CPill(cv, A, R, px(24), "Войти", size="md", style="glass", anchor="ne",
@@ -59,6 +68,46 @@ class PagesMixin:
                                     tags=("bar",))
         self.h_status = cv.create_text(L, ty + px(20), text="", anchor="w", fill=C["muted"], font=self.F.b(9))
         self._set_bar(None)
+
+    # ------------------------------------------------------------------ новости
+    def _layout_top(self):
+        """Плашки в левом верхнем углу: обновление, затем новости."""
+        x = self.px(48)
+        if not self.upd_pill.hidden:
+            x += self.upd_pill.w + self.px(10)
+        self.news_pill.move_to(x, self.px(24))
+
+    def _load_news(self):
+        self._show_news(news.cached())
+
+        def work():
+            try:
+                items = news.fetch()
+            except Exception:  # noqa: BLE001 - нет сети или сайта — остаются новости из кэша
+                return
+            self.ui(self._show_news, items)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _show_news(self, items):
+        self.news = items
+        if not items:
+            self.news_pill.set_visible(False)
+            return
+        new = news.unread(items, self.settings.get("news_seen"))
+        title = new[0]["title"] if new else ""
+        if len(title) > 42:
+            title = title[:40].rstrip() + "…"
+        self.news_pill.config(text=("●  Новое: " + title) if new else "Новости",
+                              style="sel" if new else "glass", fg="" if new else "#ffffff")  # "" — цвет стиля
+        self.news_pill.set_visible(True)
+        self._layout_top()
+
+    def open_news(self):
+        if not self.news:
+            return
+        self.settings.set("news_seen", self.news[0]["id"])
+        self._show_news(self.news)
+        NewsDialog(self, self.news)
 
     def _update_home(self):
         vid = self.selected_vid
@@ -349,3 +398,37 @@ class PagesMixin:
         self.root.clipboard_clear()
         self.root.clipboard_append(self.console.get("1.0", "end"))
         self.status("Лог скопирован в буфер обмена")
+
+
+class NewsDialog:
+    """Окно со всеми новостями (последние сверху)."""
+
+    def __init__(self, app, items):
+        from .dialogs import Dialog
+        px = app.px
+        d = Dialog(app, "Новости", "Новости ZeleesLauncher", "что нового в лаунчере", width=520)
+        sf = ScrollFrame(d.f, bg=C["panel"])
+        sf.configure(height=px(380), width=px(520))
+        sf.pack_propagate(False)
+        sf.pack(fill="both", expand=True)
+        for n in items:
+            card = tk.Frame(sf.inner, bg=C["panel2"], highlightthickness=1, highlightbackground=C["line"])
+            card.pack(fill="x", pady=(0, px(8)), padx=(0, px(10)))
+            inner = tk.Frame(card, bg=C["panel2"])
+            inner.pack(fill="x", padx=px(14), pady=px(10))
+            top = tk.Frame(inner, bg=C["panel2"])
+            top.pack(fill="x")
+            tk.Label(top, text=n["title"], bg=C["panel2"], fg=C["fg"], font=app.F.b(11, "bold"),
+                     wraplength=px(360), justify="left").pack(side="left", anchor="w")
+            tk.Label(top, text=news.fmt_date(n["at"]), bg=C["panel2"], fg=C["dim"], font=app.F.b(9)).pack(side="right")
+            tk.Label(inner, text=n["body"], bg=C["panel2"], fg="#b5bac4", font=app.F.b(10), wraplength=px(450),
+                     justify="left", anchor="w").pack(fill="x", pady=(px(4), 0))
+            if n["url"]:
+                PillButton(inner, app.A, "Подробнее", command=lambda u=n["url"]: webbrowser.open(u), size="sm",
+                           font=app.F.b(9, "bold"), bg=C["panel2"]).pack(anchor="w", pady=(px(8), 0))
+        bf = tk.Frame(d.f, bg=C["panel"])
+        bf.pack(fill="x", pady=(px(12), 0))
+        d.btn(bf, "Закрыть", d.destroy, "accent").pack(side="right")
+        d.bind("<Escape>", lambda ev: d.destroy())
+        d.center()
+        d.grab_set()
