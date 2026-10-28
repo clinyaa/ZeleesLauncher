@@ -50,6 +50,8 @@ DEFAULT_SETTINGS = {
     "separate_instances": False,  # отдельная папка игры для каждой версии
     "hide_on_launch": False,
     "discord_rpc": True,          # статус «Играет в Minecraft …» в профиле Discord
+    "beta_updates": False,        # получать бета-версии лаунчера (update-beta.json)
+    "crash_reports": None,        # отчёты об ошибках разработчику: None — ещё не спрашивали
     "show_release": True,
     "show_snapshot": False,
     "show_beta": False,

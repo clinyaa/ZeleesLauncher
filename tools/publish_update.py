@@ -111,9 +111,13 @@ def main():
                     help="минимальная версия exe; увеличьте, если пакет не заработает в старом exe")
     ap.add_argument("--upload", action="store_true", help="создать GitHub Release через gh")
     ap.add_argument("--skip-version", action="store_true", help="не менять версию в config.py")
+    ap.add_argument("--beta", action="store_true",
+                    help="бета-канал: update-beta.json вместо update.json (получат только те, кто включил бета-версии)")
     a = ap.parse_args()
 
     site = site_or_none()
+    if a.beta and not site:
+        sys.exit("Бета-канал работает только с сайтом (site_url в update_config.json)")
     if site:
         repo = None
         update_url = site[0] + "/update.json"
@@ -128,6 +132,7 @@ def main():
     pkg = build_package(a.version)
     manifest = {
         "version": a.version,
+        **({"channel": "beta"} if a.beta else {}),  # канал входит в подпись — бету не подложить вместо обычного
         "notes": a.notes,
         "min_bootstrap": a.min_bootstrap,
         "package": {"url": base + os.path.basename(pkg), "sha256": sha256(pkg), "size": os.path.getsize(pkg)},
@@ -139,7 +144,7 @@ def main():
                                  "size": os.path.getsize(inst)}
         files.append(inst)
     manifest["signature"] = update_key.sign(updater.signed_bytes(manifest))
-    man_path = os.path.join(REL, "update.json")
+    man_path = os.path.join(REL, "update-beta.json" if a.beta else "update.json")
     with open(man_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=2)
     files.append(man_path)

@@ -262,6 +262,10 @@ class PagesMixin:
         self.s_threads = tk.StringVar(value=str(self.settings.get("download_threads")))
         ef, _ = make_entry(cf, self.A, self.s_threads, width=5, font=self.F.b(10))
         ef.pack(side="left")
+        self.s_reports = tk.BooleanVar(value=self.settings.get("crash_reports") is True)
+        Switch(cf, self.A, self.s_reports).pack(side="left", padx=(px(22), px(10)))  # поле шире переключателя
+        self._label(cf, "Отчёты об ошибках").pack(side="left")
+        self._label(cf, " · анонимно, без ника и путей", muted=True, size=9).pack(side="left")
 
         cf = row("Microsoft Client ID", "пусто = встроенный ZeleesLauncher, менять не нужно")
         self.s_client = tk.StringVar(value=self.settings.get("ms_client_id"))
@@ -276,6 +280,10 @@ class PagesMixin:
         cf = row("Отдельные папки", "свой мир у каждой версии (сборки с модами — всегда)")
         self.s_sep = tk.BooleanVar(value=bool(self.settings.get("separate_instances")))
         Switch(cf, self.A, self.s_sep).pack(side="left")
+        self.s_beta = tk.BooleanVar(value=bool(self.settings.get("beta_updates")))
+        Switch(cf, self.A, self.s_beta).pack(side="left", padx=(px(40), px(10)))
+        self._label(cf, "Бета-версии лаунчера").pack(side="left")
+        self._label(cf, " · новое раньше всех", muted=True, size=9).pack(side="left")
 
         cf = row("Скрывать лаунчер", "пока запущена игра")
         self.s_hide = tk.BooleanVar(value=bool(self.settings.get("hide_on_launch")))

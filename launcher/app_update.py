@@ -23,9 +23,11 @@ class UpdateMixin:
                                     parent=self.root)
             return
 
+        beta = bool(self.s_beta.get())  # переключатель в «Опциях», даже если ещё не нажали «Сохранить»
+
         def work():
             try:
-                m = updater.check()
+                m = updater.check(beta=beta)
             except Exception as e:  # noqa: BLE001
                 if manual:
                     self.ui(self.status, "Не удалось проверить обновления: %s" % e, C["warn"])
@@ -36,7 +38,8 @@ class UpdateMixin:
     def _update_found(self, m, manual):
         self.update_manifest = m
         if m:
-            self.upd_pill.config(text="Доступно обновление %s" % m["version"])
+            beta = " (бета)" if m.get("channel") == "beta" else ""
+            self.upd_pill.config(text="Доступно обновление %s%s" % (m["version"], beta))
             self.upd_pill.set_visible(True)
             if manual:
                 self._update_clicked()
@@ -48,8 +51,9 @@ class UpdateMixin:
         if not m or self.busy:
             return
         notes = (m.get("notes") or "").strip()
-        if not messagebox.askyesno(APP_NAME, "Обновить %s до версии %s?%s" % (
-                APP_NAME, m["version"], ("\n\nЧто нового:\n" + notes) if notes else ""), parent=self.root):
+        beta = " (бета-версия)" if m.get("channel") == "beta" else ""
+        if not messagebox.askyesno(APP_NAME, "Обновить %s до версии %s%s?%s" % (
+                APP_NAME, m["version"], beta, ("\n\nЧто нового:\n" + notes) if notes else ""), parent=self.root):
             return
         self.show_page("home")
         self._set_busy(True)

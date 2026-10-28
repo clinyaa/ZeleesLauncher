@@ -5,6 +5,9 @@
                 при следующем запуске main.py подгружает код из него. Переустановка не нужна.
   * installer — полный установщик. Нужен, только если изменился сам exe (min_bootstrap).
 
+Бета-канал: update-beta.json рядом с update.json, в подписанной части "channel": "beta". Лаунчер читает его,
+только если в «Опциях» включены бета-версии, и берёт самую новую версию из двух манифестов.
+
 Манифест подписан Ed25519 (поле signature). Секретный ключ есть только на ПК автора
 (tools/update_key.py), здесь — открытый. Без верной подписи обновление не ставится, даже если
 сервер, Cloudflare или DNS скомпрометированы: sha256 файлов берётся из подписанной части.
@@ -33,10 +36,17 @@ def signed_bytes(manifest):
     return json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
 
-def verify_manifest(manifest):
-    """Возвращает манифест, только если подпись верна. Иначе — исключение."""
+def beta_url(url):
+    """Адрес манифеста бета-канала рядом с обычным."""
+    return url[:-len("update.json")] + "update-beta.json" if url.endswith("update.json") else ""
+
+
+def verify_manifest(manifest, channel="stable"):
+    """Возвращает манифест, только если подпись верна и он из нужного канала. Иначе — исключение."""
     if not isinstance(manifest, dict):
         raise IOError("Неверный формат описания обновления")
+    if manifest.get("channel", "stable") != channel:  # канал подписан: бету нельзя подложить вместо обычного
+        raise IOError("Обновление отклонено: манифест другого канала")
     try:
         sig = bytes.fromhex(str(manifest.get("signature", "")))
         pub = bytes.fromhex(UPDATE_PUBKEY)
@@ -80,11 +90,7 @@ def _mirrors(url):
     return [url]
 
 
-def check(url=None):
-    """Возвращает манифест, если есть версия новее текущей, иначе None."""
-    url = url or UPDATE_URL
-    if not url:
-        return None
+def _fetch_manifest(url):
     urls = _mirrors(url)
     for n, u in enumerate(urls):
         try:
@@ -93,10 +99,23 @@ def check(url=None):
         except Exception:  # noqa: BLE001 - пробуем следующий адрес, у последнего ошибка уходит наружу
             if n == len(urls) - 1:
                 raise
-    verify_manifest(m)
-    if m.get("version") and newer(m["version"], APP_VERSION):
-        return m
-    return None
+    return m
+
+
+def check(url=None, beta=False):
+    """Возвращает манифест, если есть версия новее текущей, иначе None.
+    beta=True — смотрит ещё и бета-канал и выбирает самую новую версию."""
+    url = url or UPDATE_URL
+    if not url:
+        return None
+    found = [verify_manifest(_fetch_manifest(url))]
+    if beta and beta_url(url):
+        try:
+            found.append(verify_manifest(_fetch_manifest(beta_url(url)), "beta"))
+        except Exception:  # noqa: BLE001 - бета-манифеста может и не быть
+            pass
+    found = [m for m in found if m.get("version") and newer(m["version"], APP_VERSION)]
+    return max(found, key=lambda m: vtuple(m["version"])) if found else None
 
 
 def _sha256(path):
@@ -127,7 +146,7 @@ def _fetch(info, dest, progress=None, label="Обновление"):
 
 def install(manifest, progress=None):
     """Скачивает обновление. Возвращает ('restart', None) или ('installer', путь_к_установщику)."""
-    verify_manifest(manifest)
+    verify_manifest(manifest, manifest.get("channel", "stable"))
     ver = manifest["version"]
     pkg, inst = manifest.get("package"), manifest.get("installer")
     if pkg and bootstrap_version() >= int(manifest.get("min_bootstrap", 1)):

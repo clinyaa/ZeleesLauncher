@@ -18,7 +18,7 @@ from .app_pages import PagesMixin
 from .app_update import UpdateMixin
 from .app_util import BASE_H, BASE_W, SIDE_W, log_to_file, open_path
 from .app_versions import VersionsMixin
-from . import discord_rpc, fileopen
+from . import crash_report, discord_rpc, fileopen, premium
 from .config import APP_NAME, Accounts, Settings, ensure_dirs
 from .dialogs import Dialog  # noqa: F401 - для старого кода, импортировавшего Dialog из gui
 from .mods_page import ModsPage
@@ -43,6 +43,10 @@ class App(PagesMixin, VersionsMixin, AccountsMixin, LaunchMixin, UpdateMixin):
         self.accounts = Accounts()
         self.premium = Premium()
         self.discord = discord_rpc.Presence(log=log_to_file)
+        self.reporter = crash_report.Reporter(
+            self.settings, self._ask_crash_reports,
+            lambda payload: premium.call("POST", "/api/crash", payload, timeout=10))
+        root.report_callback_exception = self._tk_error
         self._premium_syncing = set()
         self.q = queue.Queue()
         self.manifest = Manifest(None)
@@ -92,8 +96,20 @@ class App(PagesMixin, VersionsMixin, AccountsMixin, LaunchMixin, UpdateMixin):
                 fn(*a)
             except Exception as e:  # noqa: BLE001
                 log_to_file(traceback.format_exc())
+                self.reporter.exception(e)
                 self.ui(self._error, e)
         threading.Thread(target=run, daemon=True).start()
+
+    def _tk_error(self, exc_type, exc, tb):
+        """Ошибка в обработчике кнопки или таймера tkinter (без этого в exe она пропала бы молча)."""
+        log_to_file("".join(traceback.format_exception(exc_type, exc, tb)))
+        self.reporter.exception(exc)
+
+    def _ask_crash_reports(self, answer):
+        self.ui(lambda: answer(messagebox.askyesno(
+            APP_NAME, "В лаунчере произошла ошибка.\n\nОтправлять разработчику анонимные отчёты об ошибках? "
+            "В отчёт входят только текст ошибки, версия лаунчера и Windows — без ника, аккаунта и путей "
+            "к вашим папкам.\n\nИзменить можно в «Опциях».", parent=self.root)))
 
     def _poll(self):
         try:
@@ -101,8 +117,9 @@ class App(PagesMixin, VersionsMixin, AccountsMixin, LaunchMixin, UpdateMixin):
                 fn, a = self.q.get_nowait()
                 try:
                     fn(*a)
-                except Exception:  # noqa: BLE001
+                except Exception as e:  # noqa: BLE001
                     log_to_file(traceback.format_exc())
+                    self.reporter.exception(e)
                 if self.closed:
                     return  # окно закрыто (например, перезапуск после обновления) — остальные вызовы не нужны
         except queue.Empty:
@@ -328,6 +345,7 @@ def run():
     app.borderless = make_borderless(root)
     sys._zelees_started = True  # окно открылось — обновление (если было) рабочее
     root.after(3000, app._check_updates)
+    root.after(4000, app.reporter.check_startup_crash)
     server = None
     try:
         server = fileopen.Server(lambda p: app.ui(app.open_file, p))

@@ -108,6 +108,62 @@ class ManifestTest(unittest.TestCase):
             updater.verify_manifest(m)
 
 
+class BetaChannelTest(unittest.TestCase):
+    URL = "https://zelees.link/update/update.json"
+
+    def setUp(self):
+        for p in (mock.patch.object(updater, "UPDATE_PUBKEY", PUB.hex()),
+                  mock.patch.object(updater, "APP_VERSION", "1.1.0"),
+                  mock.patch.object(updater, "_mirrors", lambda u: [u])):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def serve(self, stable, beta=None):
+        files = {self.URL: stable}
+        if beta is not None:
+            files[updater.beta_url(self.URL)] = beta
+
+        def get_json(url, timeout=0):
+            if url not in files:
+                raise IOError("404")
+            return files[url]
+        return mock.patch.object(updater.net, "get_json", side_effect=get_json)
+
+    def test_beta_url(self):
+        self.assertEqual(updater.beta_url(self.URL), "https://zelees.link/update/update-beta.json")
+        self.assertEqual(updater.beta_url("https://x/other.json"), "")
+
+    def test_stable_users_ignore_beta(self):
+        with self.serve(signed(dict(MANIFEST, version="1.1.1")), signed(dict(MANIFEST, version="1.2.0", channel="beta"))):
+            self.assertEqual(updater.check(self.URL)["version"], "1.1.1")
+
+    def test_beta_users_get_newest(self):
+        with self.serve(signed(dict(MANIFEST, version="1.1.1")), signed(dict(MANIFEST, version="1.2.0", channel="beta"))):
+            m = updater.check(self.URL, beta=True)
+        self.assertEqual((m["version"], m["channel"]), ("1.2.0", "beta"))
+        # стабильная версия вышла новее беты — бета-тестеры получают её
+        with self.serve(signed(dict(MANIFEST, version="1.3.0")), signed(dict(MANIFEST, version="1.2.0", channel="beta"))):
+            self.assertEqual(updater.check(self.URL, beta=True)["version"], "1.3.0")
+
+    def test_missing_beta_manifest_is_fine(self):
+        with self.serve(signed(dict(MANIFEST, version="1.0.13"))):
+            self.assertIsNone(updater.check(self.URL, beta=True))
+
+    def test_beta_manifest_cannot_replace_stable(self):
+        beta = signed(dict(MANIFEST, version="1.2.0", channel="beta"))
+        with self.serve(beta), self.assertRaises(IOError):
+            updater.check(self.URL)
+        stable = signed(dict(MANIFEST, version="1.2.0"))  # обычный манифест под видом беты тоже не принимается
+        with self.serve(signed(dict(MANIFEST, version="1.0.0")), stable):
+            self.assertIsNone(updater.check(self.URL, beta=True))
+
+    def test_channel_is_signed(self):
+        m = signed(dict(MANIFEST, version="1.2.0", channel="beta"))
+        m["channel"] = "stable"
+        with self.assertRaises(IOError):
+            updater.verify_manifest(m)
+
+
 class VersionTest(unittest.TestCase):
     def test_vtuple(self):
         self.assertEqual(updater.vtuple("1.0.13"), (1, 0, 13))

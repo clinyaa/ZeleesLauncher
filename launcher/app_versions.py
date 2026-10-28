@@ -263,6 +263,9 @@ class VersionsMixin:
         s.set("separate_instances", bool(self.s_sep.get()), save=False)
         s.set("hide_on_launch", bool(self.s_hide.get()), save=False)
         s.set("discord_rpc", bool(self.s_discord.get()), save=False)
+        s.set("beta_updates", bool(self.s_beta.get()), save=False)
+        if self.s_reports.get() or s.get("crash_reports") is not None:  # «не спрашивали» не превращаем в «нет»
+            s.set("crash_reports", bool(self.s_reports.get()), save=False)
         s.set("java_mode", "auto" if self.java_auto.get() else "custom", save=False)
         s.set("java_path", self.java_path_var.get().strip(), save=False)
         s.save()
