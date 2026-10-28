@@ -6,9 +6,9 @@ import traceback
 import webbrowser
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor
-from tkinter import ttk, messagebox
+from tkinter import filedialog, ttk, messagebox
 
-from . import loaders, mods, net, packs
+from . import loaders, mods, mrpack, net, packs
 from .installer import install_version
 from .launch import instance_dir
 from .ui_kit import C, PillButton, ScrollFrame, Switch, make_entry
@@ -63,6 +63,7 @@ class ModsPage:
         self.build_box.bind("<<ComboboxSelected>>", lambda e: self._build_selected())
         app._btn(top, "+ Новая", self._new_build, style="sel", padx=14).pack(side="left")
         app._btn(top, "Сборка по коду", lambda: PackCodeDialog(self), padx=14).pack(side="left", padx=(px(8), 0))
+        app._btn(top, "Импорт .mrpack", self._import_mrpack, padx=14).pack(side="left", padx=(px(8), 0))
         app._btn(top, "Играть", self._play_build, style="accent", padx=16).pack(side="right")
         app._btn(top, "Поделиться", self._share_build, padx=14).pack(side="right", padx=px(8))
 
@@ -170,6 +171,67 @@ class ModsPage:
             self.app.status("Чтобы делиться сборками, войдите в аккаунт Microsoft", C["warn"])
             return
         ShareDialog(self)
+
+    def _import_mrpack(self):
+        app = self.app
+        path = filedialog.askopenfilename(title="Модпак Modrinth", parent=app.root,
+                                          filetypes=[("Модпак Modrinth", "*.mrpack"), ("Все файлы", "*.*")])
+        if not path:
+            return
+        if app.busy:
+            app.status("Подождите — лаунчер уже занят", C["warn"])
+            return
+        try:
+            pack = mrpack.read(path)
+        except mrpack.MrpackError as e:
+            messagebox.showerror("Импорт .mrpack", str(e), parent=app.root)
+            return
+        title = pack["name"] + (" " + pack["version"] if pack["version"] else "")
+        text = "%s\nMinecraft %s  ·  %s %s\nФайлов для скачивания: %d, файлов настроек: %d" % (
+            title, pack["mc"], loaders.LOADER_NAMES[pack["loader"]], pack["loader_version"],
+            len(pack["files"]), pack["overrides"])
+        if pack["skipped"]:
+            text += "\nНе скачаются (нет ссылки Modrinth/GitHub): %d" % len(pack["skipped"])
+        text += "\n\nБудет создана отдельная сборка со своей папкой — ваши другие сборки и миры не изменятся."
+        if not messagebox.askyesno("Импорт .mrpack", text + "\n\nУстановить?", parent=app.root):
+            return
+        try:
+            settings = app._collect_settings()
+        except ValueError as e:
+            messagebox.showerror("Импорт .mrpack", str(e), parent=app.root)
+            return
+        app.show_page("home")
+        app._set_busy(True)
+
+        def work():
+            root = settings["game_dir"]
+            vid = None
+            try:
+                ld, lv, mc = pack["loader"], pack["loader_version"], pack["mc"]
+                parent = packs.find_loader_version(root, app.manifest, ld, lv, mc)
+                if not parent:
+                    parent = install_loader(app, settings, ld, mc, lv)
+                vid = packs.create_pack_version(root, app.manifest, pack["name"], "mrpack", parent)
+                game_dir = instance_dir(settings, root, vid)
+                app.ui(app.status, "Модпак «%s»: копирую настройки..." % pack["name"])
+                mrpack.extract_overrides(path, game_dir)
+                mrpack.install_files(pack, game_dir, settings.get("download_threads", 16), app.progress, app.cancel)
+                app.ui(app.log, "Модпак «%s» (%s) установлен: %s, файлов: %d" % (
+                    title, os.path.basename(path), vid, len(pack["files"])))
+                failed = [(p, "нет ссылки для скачивания") for p in pack["skipped"]]
+                for what, why in failed:
+                    app.ui(app.log, "Не скачано: %s — %s" % (what, why), "WARN")
+                app.ui(_build_done, app, vid, pack["name"], failed, "Импорт .mrpack")
+            except net.Cancelled:
+                _remove_build(root, vid)
+                app.ui(app.status, "Отменено", C["warn"])
+            except Exception as e:  # noqa: BLE001
+                _remove_build(root, vid)
+                app.ui(app.log, traceback.format_exc(), "ERROR")
+                app.ui(app._error, e)
+            finally:
+                app.ui(app._set_busy, False)
+        app.bg(work)
 
     def _refresh_view(self):
         self.list.clear()
@@ -598,6 +660,26 @@ class ModsPage:
         threading.Thread(target=work, daemon=True).start()
 
 
+def _remove_build(root, vid):
+    """Недоустановленная сборка не должна остаться в списке."""
+    if not vid:
+        return
+    import shutil
+    loaders.remove_version(root, vid)
+    shutil.rmtree(os.path.join(root, "instances", vid), ignore_errors=True)
+
+
+def _build_done(app, vid, name, failed, title):
+    app._build_created(vid)
+    app.status("Сборка «%s» готова — нажмите «Играть»" % name, C["accent"])
+    if failed:
+        lines = "\n".join("• %s — %s" % fw for fw in failed[:12])
+        if len(failed) > 12:
+            lines += "\n… и ещё %d" % (len(failed) - 12)
+        messagebox.showwarning(title, "Сборка установлена, но часть файлов скачать не удалось:\n\n"
+                               + lines, parent=app.root)
+
+
 def install_loader(app, settings, ld, mc, lv):
     """Ставит загрузчик (для Forge/NeoForge — сначала Java и сам Minecraft). Возвращает id версии. В фоне."""
     root = settings["game_dir"]
@@ -969,34 +1051,14 @@ class PackCodeDialog:
                     data["name"], data["code"], vid, len(items)))
                 for what, why in failed:
                     app.ui(app.log, "Не скачано: %s — %s" % (what, why), "WARN")
-                app.ui(self._done, vid, data["name"], failed)
+                app.ui(_build_done, app, vid, data["name"], failed, "Сборка по коду")
             except net.Cancelled:
-                self._cleanup(root, vid)
+                _remove_build(root, vid)
                 app.ui(app.status, "Отменено", C["warn"])
             except Exception as e:  # noqa: BLE001
-                self._cleanup(root, vid)
+                _remove_build(root, vid)
                 app.ui(app.log, traceback.format_exc(), "ERROR")
                 app.ui(app._error, e)
             finally:
                 app.ui(app._set_busy, False)
         app.bg(work)
-
-    @staticmethod
-    def _cleanup(root, vid):
-        """Недоустановленная сборка не должна остаться в списке."""
-        if not vid:
-            return
-        import shutil
-        loaders.remove_version(root, vid)
-        shutil.rmtree(os.path.join(root, "instances", vid), ignore_errors=True)
-
-    def _done(self, vid, name, failed):
-        app = self.app
-        app._build_created(vid)
-        app.status("Сборка «%s» готова — нажмите «Играть»" % name, C["accent"])
-        if failed:
-            lines = "\n".join("• %s — %s" % fw for fw in failed[:12])
-            if len(failed) > 12:
-                lines += "\n… и ещё %d" % (len(failed) - 12)
-            messagebox.showwarning("Сборка по коду", "Сборка установлена, но часть файлов скачать не удалось:\n\n"
-                                   + lines, parent=app.root)
