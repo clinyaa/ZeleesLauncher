@@ -5,7 +5,7 @@ import sys
 import threading
 
 APP_NAME = "ZeleesLauncher"
-APP_VERSION = "1.0.13"
+APP_VERSION = "1.1.0"
 
 # Откуда лаунчер берёт обновления. Заполняется один раз (см. tools/publish_update.py):
 # "https://github.com/<владелец>/<репозиторий>/releases/latest/download/update.json"
@@ -49,6 +49,7 @@ DEFAULT_SETTINGS = {
     "fullscreen": False,
     "separate_instances": False,  # отдельная папка игры для каждой версии
     "hide_on_launch": False,
+    "discord_rpc": True,          # статус «Играет в Minecraft …» в профиле Discord
     "show_release": True,
     "show_snapshot": False,
     "show_beta": False,

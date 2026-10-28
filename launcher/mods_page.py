@@ -1,6 +1,8 @@
 """Вкладка «Моды»: сборки с загрузчиком, каталог Modrinth/CurseForge, установленные моды и проверка совместимости."""
 import base64
 import os
+import subprocess
+import sys
 import threading
 import traceback
 import webbrowser
@@ -11,9 +13,11 @@ from tkinter import filedialog, ttk, messagebox
 from . import loaders, mods, mrpack, net, packs
 from .installer import install_version
 from .launch import instance_dir
+from .app_util import open_path
 from .ui_kit import C, PillButton, ScrollFrame, Switch, make_entry
 from .versions import local_versions, resolve_version, required_java
 
+KIND_WHAT = {"mod": "моды", "resourcepack": "ресурс-паки", "shader": "шейдеры"}
 STATUS_COLOR = {"ok": C["accent"], "bad": C["err"], "unknown": C["muted"]}
 LETTER_COLORS = ["#2f6b45", "#6b4a2f", "#2f4f6b", "#5a2f6b", "#6b2f3f", "#4f6b2f"]
 
@@ -34,6 +38,7 @@ class ModsPage:
         self.builds = []          # [(vid, loader, loader_ver, mc)]
         self.build = None
         self.mode = "catalog"
+        self.kind = "mod"         # что ищем в каталоге: mod | resourcepack | shader
         self.source = "modrinth"
         self.offset = 0
         self.total = 0
@@ -63,20 +68,24 @@ class ModsPage:
         self.build_box.bind("<<ComboboxSelected>>", lambda e: self._build_selected())
         app._btn(top, "+ Новая", self._new_build, style="sel", padx=14).pack(side="left")
         app._btn(top, "Сборка по коду", lambda: PackCodeDialog(self), padx=14).pack(side="left", padx=(px(8), 0))
-        app._btn(top, "Импорт .mrpack", self._import_mrpack, padx=14).pack(side="left", padx=(px(8), 0))
+        app._btn(top, "Импорт .mrpack", self.import_mrpack, padx=14).pack(side="left", padx=(px(8), 0))
         app._btn(top, "Играть", self._play_build, style="accent", padx=16).pack(side="right")
-        app._btn(top, "Поделиться", self._share_build, padx=14).pack(side="right", padx=px(8))
+        self.share_btn = app._btn(top, "Поделиться ▾", self._share_menu, padx=14)
+        self.share_btn.pack(side="right", padx=px(8))
 
         bar = tk.Frame(body, bg=C["bg"])
         bar.pack(fill="x", pady=(px(14), px(10)))
-        self.tab_cat = app._btn(bar, "Каталог", lambda: self._set_mode("catalog"), style="sel", padx=16)
-        self.tab_cat.pack(side="left")
-        self.tab_inst = app._btn(bar, "Установленные", lambda: self._set_mode("installed"), padx=16)
-        self.tab_inst.pack(side="left", padx=(px(8), 0))
+        self.tabs = {}
+        for i, (key, name) in enumerate((("mod", "Моды"), ("resourcepack", "Ресурс-паки"), ("shader", "Шейдеры"),
+                                         ("installed", "Установленные"))):
+            b = app._btn(bar, name, lambda k=key: self._set_mode(k), style="sel" if key == "mod" else "dark",
+                         padx=14)
+            b.pack(side="left", padx=(px(8) if i else 0, 0))
+            self.tabs[key] = b
 
         self.cat_tools = tk.Frame(bar, bg=C["bg"])
         self.cat_tools.pack(side="right")
-        ef, self.search_entry = make_entry(self.cat_tools, self.A, self.query_var, width=24, font=self.F.b(10))
+        ef, self.search_entry = make_entry(self.cat_tools, self.A, self.query_var, width=18, font=self.F.b(10))
         ef.pack(side="left")
         self.query_var.trace_add("write", lambda *a: self._schedule_search())
         sort = ttk.Combobox(self.cat_tools, textvariable=self.sort_var, state="readonly", width=12,
@@ -144,6 +153,11 @@ class ModsPage:
         root = self.app._game_root()
         return os.path.join(instance_dir(self.app.settings.data, root, self.build[0]), "mods")
 
+    def content_folder(self):
+        """Папка сборки для текущего вида каталога (mods, resourcepacks или shaderpacks)."""
+        d = os.path.join(os.path.dirname(self.mods_dir()), packs.KIND_DIRS[self.kind])
+        return mods.ModFolder(d, mods.KIND_EXT[self.kind])
+
     def _open_mods(self):
         d = self.mods_dir()
         if d:
@@ -157,11 +171,26 @@ class ModsPage:
         self.app.show_page("home")
         self.app._play_clicked()
 
-    def _share_build(self):
+    def _share_menu(self):
         if not self.build:
             messagebox.showinfo("Поделиться", "Сначала создайте сборку с загрузчиком и добавьте в неё моды.",
                                 parent=self.app.root)
             return
+        m = tk.Menu(self.app.root, tearoff=0, bg=C["panel2"], fg=C["fg"], activebackground=C["sel"],
+                    activeforeground="white", bd=0, relief="flat", font=self.F.b(10))
+        m.add_command(label="Кодом — короткий код и ссылка zelees.link…", command=self._share_build)
+        m.add_command(label="Файлом .mrpack — для друга или Modrinth…", command=self._export_build)
+        b = self.share_btn
+        m.tk_popup(b.winfo_rootx(), b.winfo_rooty() + b.winfo_height() + self.px(4))
+
+    def _export_build(self):
+        if not self.build[2]:
+            messagebox.showinfo("Экспорт .mrpack", "Не удалось определить версию загрузчика этой сборки.",
+                                parent=self.app.root)
+            return
+        ExportDialog(self)
+
+    def _share_build(self):
         if not self.build[2]:
             messagebox.showinfo("Поделиться", "Не удалось определить версию загрузчика этой сборки — "
                                 "ей нельзя поделиться кодом.", parent=self.app.root)
@@ -172,10 +201,12 @@ class ModsPage:
             return
         ShareDialog(self)
 
-    def _import_mrpack(self):
+    def import_mrpack(self, path=None):
+        """Ставит модпак из файла .mrpack (без path — спрашивает файл)."""
         app = self.app
-        path = filedialog.askopenfilename(title="Модпак Modrinth", parent=app.root,
-                                          filetypes=[("Модпак Modrinth", "*.mrpack"), ("Все файлы", "*.*")])
+        if not path:
+            path = filedialog.askopenfilename(title="Модпак Modrinth", parent=app.root,
+                                              filetypes=[("Модпак Modrinth", "*.mrpack"), ("Все файлы", "*.*")])
         if not path:
             return
         if app.busy:
@@ -261,10 +292,16 @@ class ModsPage:
         NewBuildDialog(self)
 
     # ------------------------------------------------------------------ режимы
-    def _set_mode(self, mode):
+    def _set_mode(self, key):
+        """key: вид контента каталога (mod | resourcepack | shader) или installed."""
+        if key != "installed":
+            if self.kind != key:
+                self.query_var.set("")
+            self.kind = key
+        mode = "installed" if key == "installed" else "catalog"
         self.mode = mode
-        self.tab_cat.config_pill(style="sel" if mode == "catalog" else "dark")
-        self.tab_inst.config_pill(style="sel" if mode == "installed" else "dark")
+        for k, b in self.tabs.items():
+            b.config_pill(style="sel" if k == key else "dark")
         if mode == "catalog":
             self.inst_tools.pack_forget()
             self.cat_tools.pack(side="right")
@@ -312,17 +349,22 @@ class ModsPage:
                 "Новые": "newest"}[self.sort_var.get()]
         q = self.query_var.get().strip()
         prov = self.provider()
-        self._set_status("Поиск в %s: моды для %s %s..." % (prov.name, loaders.LOADER_NAMES[ld], mc))
+        kind = self.kind
+        self._set_status("Поиск в %s: %s для %s..." % (prov.name, KIND_WHAT[kind], self._for_build(kind)))
         offset = self.offset
 
         def work():
             try:
-                hits, total = prov.search(q, mc, ld, offset=offset, sort=sort)
+                hits, total = prov.search(q, mc, ld, offset=offset, sort=sort, kind=kind)
             except Exception as e:  # noqa: BLE001
                 self.app.ui(self._set_status, "Не удалось загрузить каталог: %s" % e, C["err"])
                 return
             self.app.ui(self._show_hits, seq, hits, total)
         threading.Thread(target=work, daemon=True).start()
+
+    def _for_build(self, kind):
+        _vid, ld, _lv, mc = self.build[:4]
+        return "%s %s" % (loaders.LOADER_NAMES[ld], mc) if kind == "mod" else "Minecraft " + mc
 
     def _show_hits(self, seq, hits, total):
         if seq != self._search_seq or self.mode != "catalog":
@@ -334,12 +376,11 @@ class ModsPage:
         for h in hits:
             self._hit_row(h)
         self.offset += len(hits)
-        _vid, ld, _lv, mc = self.build[:4]
         if not hits and self.offset == 0:
-            self._set_status("Ничего не найдено для %s %s" % (loaders.LOADER_NAMES[ld], mc), C["warn"])
+            self._set_status("Ничего не найдено для %s" % self._for_build(self.kind), C["warn"])
         else:
-            self._set_status("Показано %d из %s · только моды, совместимые с %s %s" % (
-                self.offset, fmt_num(total), loaders.LOADER_NAMES[ld], mc))
+            self._set_status("Показано %d из %s · только %s для %s" % (
+                self.offset, fmt_num(total), KIND_WHAT[self.kind], self._for_build(self.kind)))
         if self.offset < total and hits:
             f = tk.Frame(self.list.inner, bg=C["bg"])
             f._more = True
@@ -436,18 +477,20 @@ class ModsPage:
         btn.config_pill(text="Загрузка…", style="disabled", image=self.A.icon("download"))
         _vid, ld, _lv, mc = self.build[:4]
         prov = self.provider()
-        folder = mods.ModFolder(self.mods_dir())
+        kind = self.kind
+        folder = self.content_folder()
 
         def work():
             try:
-                mf = prov.best_file(h["id"], mc, ld)
+                mf = prov.best_file(h["id"], mc, ld, kind=kind)
                 if not mf:
-                    self.app.ui(self._install_done, btn, False, "Нет версии «%s» для %s %s" % (
-                        h["title"], loaders.LOADER_NAMES[ld], mc))
+                    self.app.ui(self._install_done, btn, False, "Нет версии «%s» для %s" % (
+                        h["title"], self._for_build(kind)))
                     return
                 mf.setdefault("page_url", h.get("page_url"))
                 keys = set(self.installed_keys) - {(h["source"], h["id"])}
-                plan = mods.resolve_install(prov, mf, mc, ld, keys, log=self.app.log)
+                # у ресурс-паков и шейдеров зависимостей-модов не бывает
+                plan = mods.resolve_install(prov, mf, mc, ld, keys, log=self.app.log) if kind == "mod" else [mf]
                 names = []
                 for item in plan:
                     if item is mf:
@@ -461,10 +504,14 @@ class ModsPage:
                         names.append(title)
                     item.setdefault("page_url", h.get("page_url"))
                     folder.install(item, title, icon)
-                    self.app.ui(self.app.log, "Мод установлен: %s (%s)" % (title, item["filename"]))
+                    self.app.ui(self.app.log, "Установлено: %s (%s)" % (title, item["filename"]))
                 msg = "«%s» установлен" % h["title"]
                 if names:
                     msg += " + зависимости: " + ", ".join(names)
+                if mf.get("other_mc"):
+                    msg += " (для Minecraft %s версии нет — поставлена последняя, игра может предупредить)" % mc
+                if kind == "shader" and ld in ("fabric", "quilt") and not self._has_iris():
+                    msg += " · для шейдеров нужен мод Iris"
                 self.app.ui(self._install_done, btn, True, msg)
             except mods.ModsError as e:
                 self.app.ui(self._install_done, btn, False, str(e), e.url)
@@ -486,14 +533,21 @@ class ModsPage:
         self._update_installed_keys()
 
     def _update_installed_keys(self):
-        d = self.mods_dir()
         keys = set()
-        if d:
-            keys |= set(mods.ModFolder(d).installed_projects().keys())
-        for r in self.checked:
-            if r.get("project_id") and r.get("source"):
-                keys.add((r["source"], r["project_id"]))
+        if self.mods_dir():
+            keys |= set(self.content_folder().installed_projects().keys())
+        if self.kind == "mod":
+            for r in self.checked:
+                if r.get("project_id") and r.get("source"):
+                    keys.add((r["source"], r["project_id"]))
         self.installed_keys = keys
+
+    def _has_iris(self):
+        """Стоит ли в сборке Iris (без него Fabric/Quilt шейдеры не загрузит)."""
+        folder = mods.ModFolder(self.mods_dir())
+        if any(m.get("project_id") == "YL57xq9U" for m in folder.index.values()):  # Iris на Modrinth
+            return True
+        return any(e["base"].lower().startswith("iris") for e in folder.entries() if e["enabled"])
 
     # ------------------------------------------------------------------ установленные
     def refresh_installed(self):
@@ -808,6 +862,153 @@ def _pack_summary(files):
     parts = [t % n[k] for k, t in (("mod", "модов: %d"), ("resourcepack", "ресурс-паков: %d"),
                                     ("shader", "шейдеров: %d")) if n[k]]
     return ", ".join(parts) or "без модов"
+
+
+class ExportDialog:
+    """Сохраняет сборку в файл .mrpack: моды с Modrinth — ссылками, остальное и настройки — внутрь файла."""
+
+    def __init__(self, page):
+        from .dialogs import Dialog
+        self.page, self.app = page, page.app
+        app, px = self.app, self.app.px
+        _vid, ld, lv, mc, name = page.build
+        self.build = page.build
+        self.game_dir = os.path.dirname(page.mods_dir())
+        self.scan = None
+        d = Dialog(app, "Экспорт .mrpack", "Экспорт в .mrpack", "файл откроется в любом лаунчере с Modrinth-паками")
+        self.d = d
+        f = d.f
+        row = tk.Frame(f, bg=C["panel"])
+        row.pack(fill="x")
+        col = tk.Frame(row, bg=C["panel"])
+        col.pack(side="left", fill="x", expand=True)
+        tk.Label(col, text="Название", bg=C["panel"], fg=C["fg"], font=app.F.b(10, "bold")).pack(anchor="w")
+        self.name_var = tk.StringVar(value=name or "%s %s" % (loaders.LOADER_NAMES[ld], mc))
+        ef, _e = make_entry(col, app.A, self.name_var, width=30, font=app.F.b(11))
+        ef.pack(fill="x", pady=(px(4), 0))
+        col = tk.Frame(row, bg=C["panel"])
+        col.pack(side="left", padx=(px(10), 0))
+        tk.Label(col, text="Версия", bg=C["panel"], fg=C["fg"], font=app.F.b(10, "bold")).pack(anchor="w")
+        self.ver_var = tk.StringVar(value="1.0.0")
+        ef, _e = make_entry(col, app.A, self.ver_var, width=10, font=app.F.b(11))
+        ef.pack(pady=(px(4), 0))
+        tk.Label(f, text="Minecraft %s  ·  %s %s" % (mc, loaders.LOADER_NAMES[ld], lv), bg=C["panel"],
+                 fg=C["muted"], font=app.F.b(9)).pack(anchor="w", pady=(px(10), px(6)))
+        self.embed_var = tk.BooleanVar(value=True)
+        self.config_var = tk.BooleanVar(value=True)
+        for var, text in ((self.embed_var, "Вложить файлы, которых нет на Modrinth"),
+                          (self.config_var, "Вложить настройки модов (папка config)")):
+            r = tk.Frame(f, bg=C["panel"])
+            r.pack(fill="x", pady=px(3))
+            Switch(r, app.A, var, command=self._update_info, bg=C["panel"]).pack(side="left")
+            tk.Label(r, text=text, bg=C["panel"], fg=C["fg"], font=app.F.b(10)).pack(side="left", padx=px(10))
+        self.info = tk.Label(f, text="Проверяю файлы сборки на Modrinth...", bg=C["panel"], fg=C["muted"],
+                             font=app.F.b(9), wraplength=px(440), justify="left")
+        self.info.pack(anchor="w", pady=(px(8), 0))
+        bf = tk.Frame(f, bg=C["panel"])
+        bf.pack(fill="x", side="bottom", pady=(px(16), 0))
+        self.ok = d.btn(bf, "Сохранить…", self._save, "accent")
+        self.ok.config_pill(enabled=False)
+        self.ok.pack(side="right")
+        self.cancel_btn = d.btn(bf, "Отмена", d.destroy)
+        self.cancel_btn.pack(side="right", padx=px(8))
+        d.bind("<Escape>", lambda ev: d.destroy())
+        d.center()
+        d.grab_set()
+
+        def work():
+            try:
+                files, disabled = mrpack.scan(self.game_dir)
+                urls = mrpack.identify(files) if files else {}
+                res, err = (files, disabled, urls, mrpack.config_files(self.game_dir)), None
+            except Exception as ex:  # noqa: BLE001
+                res, err = None, ex
+            app.ui(self._scanned, res, err)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _state(self, text, color=None):
+        if self.d.winfo_exists():
+            self.info.configure(text=text, fg=color or C["muted"])
+
+    def _scanned(self, res, err):
+        if not self.d.winfo_exists():
+            return
+        if err:
+            self._state("Не удалось проверить файлы на Modrinth: %s" % err, C["err"])
+            return
+        self.scan = res
+        self.ok.config_pill(enabled=True)
+        self._update_info()
+
+    def _update_info(self):
+        if not self.scan:
+            return
+        files, disabled, urls, configs = self.scan
+        linked = [f for f in files if f["sha1"] in urls]
+        other = [f for f in files if f["sha1"] not in urls]
+        text = "Ссылками на Modrinth: %d из %d файлов." % (len(linked), len(files))
+        if other:
+            names = ", ".join(os.path.basename(f["path"]) for f in other[:5])
+            names += " и ещё %d" % (len(other) - 5) if len(other) > 5 else ""
+            text += ("\nВнутрь файла: " if self.embed_var.get() else "\nНе войдут: ") + names
+            if self.embed_var.get():
+                text += "\nНа Modrinth такой пак не загрузить, если у этих файлов нет разрешения на распространение."
+        if self.config_var.get():
+            text += "\nФайлов настроек: %d." % len(configs)
+        if disabled:
+            text += "\nОтключённые моды не войдут: %d." % len(disabled)
+        self._state(text, C["warn"] if other else C["muted"])
+
+    def _save(self):
+        if not self.scan:
+            return
+        name, ver = self.name_var.get().strip(), self.ver_var.get().strip()
+        if not name or len(name) > 40:
+            self._state("Название: от 1 до 40 символов", C["err"])
+            return
+        path = filedialog.asksaveasfilename(
+            parent=self.d, title="Сохранить модпак", defaultextension=".mrpack",
+            initialfile="%s-%s.mrpack" % (packs.slug(name), packs.slug(ver or "1.0.0")),
+            filetypes=[("Модпак Modrinth", "*.mrpack")])
+        if not path:
+            return
+        files, _disabled, urls, configs = self.scan
+        _vid, ld, lv, mc, _n = self.build
+        index = mrpack.build_index(name, ver, "", mc, ld, lv, files, urls)
+        embed = [(f["path"], f["abs"]) for f in files if f["sha1"] not in urls] if self.embed_var.get() else []
+        if self.config_var.get():
+            embed += configs
+        self.ok.config_pill(enabled=False)
+        self._state("Сохраняю...")
+        app = self.app
+
+        def work():
+            try:
+                mrpack.write(path, index, embed)
+                err = None
+            except Exception as ex:  # noqa: BLE001
+                err = ex
+            app.ui(self._saved, path, err)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _saved(self, path, err):
+        if not self.d.winfo_exists():
+            return
+        if err:
+            self.ok.config_pill(enabled=True)
+            self._state("Не удалось сохранить: %s" % err, C["err"])
+            return
+        self.app.log("Сборка экспортирована: %s" % path)
+        self._state("Сохранено: %s" % path, C["accent"])
+        self.ok.config_pill(text="Показать файл", command=lambda: _show_in_folder(path), enabled=True)
+        self.cancel_btn.config_pill(text="Готово")
+
+
+def _show_in_folder(path):
+    if sys.platform.startswith("win"):
+        subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+    else:
+        open_path(os.path.dirname(path))
 
 
 class ShareDialog:

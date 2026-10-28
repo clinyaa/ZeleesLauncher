@@ -164,7 +164,7 @@ class LaunchMixin:
             self.proc = start_process(cmd, game_dir,
                                       lambda line, lvl: self.ui(self.log, line, lvl),
                                       lambda code: self.ui(self._game_exited, code))
-            self.ui(self._game_started, settings)
+            self.ui(self._game_started, settings, vdata, server)
         except net.Cancelled:
             self.ui(self.status, "Отменено", C["warn"])
         finally:
@@ -192,14 +192,19 @@ class LaunchMixin:
             self.ui(self.status, "Внимание: проблемы с модами (%d) — игра может не запуститься. См. «Моды»"
                     % (len(bad) + len(miss)), C["warn"])
 
-    def _game_started(self, settings):
+    def _game_started(self, settings, vdata=None, server=None):
         self.status("Игра запущена — приятной игры!", C["accent"])
+        if vdata and settings.get("discord_rpc", True):
+            from . import discord_rpc, loaders
+            ld, _lv, mc = loaders.detect(vdata)
+            self.discord.set(discord_rpc.build_activity(mc, loaders.LOADER_NAMES.get(ld), server))
         self.kill_btn.config_pill(enabled=True)
         if settings.get("hide_on_launch"):
             self.root.withdraw()
 
     def _game_exited(self, code):
         self.kill_btn.config_pill(enabled=False)
+        self.discord.clear()
         self.root.deiconify()
         if code == 0:
             self.log("Игра закрыта")

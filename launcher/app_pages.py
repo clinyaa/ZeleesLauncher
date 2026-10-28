@@ -234,6 +234,8 @@ class PagesMixin:
 
         cf = row("Папка игры", "сохранения, моды, ресурспаки")
         self.s_game_dir = tk.StringVar(value=self.settings.get("game_dir"))
+        self.s_game_dir.trace_add("write", lambda *a: self._game_root())  # обновляет значение для фоновых потоков
+        self._game_root()
         ef, _ = make_entry(cf, self.A, self.s_game_dir, font=self.F.b(10))
         ef.pack(side="left", fill="x", expand=True)
         self._btn(cf, "Обзор", self._browse_game_dir).pack(side="left", padx=(px(8), 0))
@@ -278,6 +280,10 @@ class PagesMixin:
         cf = row("Скрывать лаунчер", "пока запущена игра")
         self.s_hide = tk.BooleanVar(value=bool(self.settings.get("hide_on_launch")))
         Switch(cf, self.A, self.s_hide).pack(side="left")
+        self.s_discord = tk.BooleanVar(value=bool(self.settings.get("discord_rpc")))
+        Switch(cf, self.A, self.s_discord).pack(side="left", padx=(px(40), px(10)))
+        self._label(cf, "Статус в Discord").pack(side="left")
+        self._label(cf, " · версия игры и сервер в профиле", muted=True, size=9).pack(side="left")
 
         foot = tk.Frame(body, bg=C["bg"])
         foot.pack(fill="x", side="bottom")

@@ -103,12 +103,25 @@ begin
   DeleteFile(Probe);
 end;
 
+// Связь с .mrpack лаунчер создаёт сам при запуске (launcher/fileopen.py) — убираем её при удалении
+procedure RemoveMrpackAssociation;
+var
+  Current: String;
+begin
+  RegDeleteKeyIncludingSubkeys(HKCU, 'Software\Classes\ZeleesLauncher.mrpack');
+  RegDeleteValue(HKCU, 'Software\Classes\.mrpack\OpenWithProgids', 'ZeleesLauncher.mrpack');
+  if RegQueryStringValue(HKCU, 'Software\Classes\.mrpack', '', Current) and
+     (CompareText(Current, 'ZeleesLauncher.mrpack') = 0) then
+    RegDeleteValue(HKCU, 'Software\Classes\.mrpack', '');
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   DataDir: String;
 begin
   if CurUninstallStep = usPostUninstall then
   begin
+    RemoveMrpackAssociation;
     DataDir := ExpandConstant('{userappdata}\{#AppName}');
     if DirExists(DataDir) and not UninstallSilent then
       if MsgBox('Удалить также игры, моды, скины и настройки?' + #13#10 + #13#10 + DataDir,

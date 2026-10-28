@@ -18,6 +18,7 @@ from .app_pages import PagesMixin
 from .app_update import UpdateMixin
 from .app_util import BASE_H, BASE_W, SIDE_W, log_to_file, open_path
 from .app_versions import VersionsMixin
+from . import discord_rpc, fileopen
 from .config import APP_NAME, Accounts, Settings, ensure_dirs
 from .dialogs import Dialog  # noqa: F401 - для старого кода, импортировавшего Dialog из gui
 from .mods_page import ModsPage
@@ -41,12 +42,14 @@ class App(PagesMixin, VersionsMixin, AccountsMixin, LaunchMixin, UpdateMixin):
         self.settings = Settings()
         self.accounts = Accounts()
         self.premium = Premium()
+        self.discord = discord_rpc.Presence(log=log_to_file)
         self._premium_syncing = set()
         self.q = queue.Queue()
         self.manifest = Manifest(None)
         self.javas = []
         self.req_cache = {}
         self.busy = False
+        self.closed = False
         self.cancel = threading.Event()
         self.proc = None
         self._progress = None
@@ -100,6 +103,8 @@ class App(PagesMixin, VersionsMixin, AccountsMixin, LaunchMixin, UpdateMixin):
                     fn(*a)
                 except Exception:  # noqa: BLE001
                     log_to_file(traceback.format_exc())
+                if self.closed:
+                    return  # окно закрыто (например, перезапуск после обновления) — остальные вызовы не нужны
         except queue.Empty:
             pass
         with self._progress_lock:
@@ -125,6 +130,15 @@ class App(PagesMixin, VersionsMixin, AccountsMixin, LaunchMixin, UpdateMixin):
         x0, y0, x1, y1 = self.hc.coords(self.h_track)
         self.hc.coords(self.h_fill, x0, y0, x0 + (x1 - x0) * max(0.0, min(1.0, frac)), y1)
         self.hc.itemconfigure(self.h_pct, text="%d%%" % int(frac * 100))
+
+    def open_file(self, path):
+        """Файл, открытый двойным кликом (или переданный из второго запуска лаунчера)."""
+        if self.closed:
+            return
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+        self.mods_page.import_mrpack(path)
 
     def _error(self, e):
         self.status("Ошибка: %s" % e, C["err"])
@@ -266,6 +280,7 @@ class App(PagesMixin, VersionsMixin, AccountsMixin, LaunchMixin, UpdateMixin):
         except Exception:  # noqa: BLE001
             pass
         self.cancel.set()
+        self.closed = True
         self.root.destroy()
 
 # =====================================================================================
@@ -283,6 +298,9 @@ def pick_scale(root):
 
 
 def run():
+    path = fileopen.file_arg()
+    if path and fileopen.send(path):
+        return  # лаунчер уже открыт — модпак откроется в нём
     set_app_id()
     if sys.platform.startswith("win"):
         try:
@@ -310,4 +328,16 @@ def run():
     app.borderless = make_borderless(root)
     sys._zelees_started = True  # окно открылось — обновление (если было) рабочее
     root.after(3000, app._check_updates)
-    root.mainloop()
+    server = None
+    try:
+        server = fileopen.Server(lambda p: app.ui(app.open_file, p))
+    except OSError:
+        log_to_file(traceback.format_exc())
+    app.bg(fileopen.register)
+    if path:
+        root.after(1500, app.open_file, path)
+    try:
+        root.mainloop()
+    finally:
+        if server:
+            server.close()

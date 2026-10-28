@@ -1,5 +1,6 @@
 """Список версий, поиск Java и сохранение настроек."""
 import os
+import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
@@ -58,7 +59,11 @@ class VersionsMixin:
 
     # ------------------------------------------------------------------ список версий
     def _game_root(self):
-        return os.path.abspath(self.s_game_dir.get().strip() or self.settings.get("game_dir"))
+        """Папка игры из поля «Опций». Переменные tkinter читаются только в главном потоке,
+        фоновые потоки получают последнее прочитанное значение."""
+        if threading.current_thread() is threading.main_thread():
+            self._game_root_cache = os.path.abspath(self.s_game_dir.get().strip() or self.settings.get("game_dir"))
+        return getattr(self, "_game_root_cache", None) or os.path.abspath(self.settings.get("game_dir"))
 
     def _current_game_dir(self):
         return instance_dir({"separate_instances": self.s_sep.get()}, self._game_root(), self.selected_vid or "")
@@ -257,6 +262,7 @@ class VersionsMixin:
         s.set("curseforge_key", self.s_cf.get().strip(), save=False)
         s.set("separate_instances", bool(self.s_sep.get()), save=False)
         s.set("hide_on_launch", bool(self.s_hide.get()), save=False)
+        s.set("discord_rpc", bool(self.s_discord.get()), save=False)
         s.set("java_mode", "auto" if self.java_auto.get() else "custom", save=False)
         s.set("java_path", self.java_path_var.get().strip(), save=False)
         s.save()

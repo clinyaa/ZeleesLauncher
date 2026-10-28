@@ -13,6 +13,10 @@ CURSEFORGE = "https://api.curseforge.com/v1"
 CF_GAME = 432
 CF_CLASS_MODS = 6
 CF_LOADER = {"forge": 1, "fabric": 4, "quilt": 5, "neoforge": 6}
+# виды контента каталога: мод, ресурс-пак, шейдер
+CF_CLASS = {"mod": CF_CLASS_MODS, "resourcepack": 12, "shader": 6552}
+CF_PAGE = {"mod": "mc-mods", "resourcepack": "texture-packs", "shader": "shaders"}
+KIND_EXT = {"mod": ".jar", "resourcepack": ".zip", "shader": ".zip"}
 
 INDEX_NAME = ".zelees-mods.json"
 OLD_INDEX_NAME = ".mylauncher-mods.json"
@@ -39,11 +43,11 @@ class Modrinth:
             url += "?" + urllib.parse.urlencode(params)
         return net.get_json(url, timeout=20)
 
-    def search(self, query, mc, loader, offset=0, sort="downloads", limit=20):
-        facets = [["project_type:mod"]]
+    def search(self, query, mc, loader, offset=0, sort="downloads", limit=20, kind="mod"):
+        facets = [["project_type:" + kind]]
         if mc:
             facets.append(["versions:" + mc])
-        ls = modrinth_loaders(loader)
+        ls = modrinth_loaders(loader) if kind == "mod" else []
         if ls:
             facets.append(["categories:" + l for l in ls])
         r = self._get("/search", {"query": query or "", "facets": json.dumps(facets), "index": sort,
@@ -55,7 +59,7 @@ class Modrinth:
                 "author": h.get("author", ""), "description": h.get("description", ""),
                 "downloads": h.get("downloads", 0), "icon_url": h.get("icon_url") or "",
                 "categories": [c for c in h.get("categories", []) if c not in ("fabric", "forge", "quilt", "neoforge")],
-                "page_url": "https://modrinth.com/mod/%s" % (h.get("slug") or h["project_id"]),
+                "page_url": "https://modrinth.com/%s/%s" % (kind, h.get("slug") or h["project_id"]),
                 "client_side": h.get("client_side"),
             })
         return hits, r.get("total_hits", len(hits))
@@ -73,15 +77,20 @@ class Modrinth:
             "game_versions": v.get("game_versions", []), "loaders": v.get("loaders", []),
             "deps": [(d.get("project_id"), d.get("version_id"), d.get("dependency_type"))
                      for d in v.get("dependencies", [])],
-            "version_type": v.get("version_type", "release"),
+            "version_type": v.get("version_type", "release"), "other_mc": bool(v.get("_other_mc")),
         }
 
-    def best_file(self, project_id, mc, loader):
+    def best_file(self, project_id, mc, loader, kind="mod"):
         params = {"game_versions": json.dumps([mc])}
-        ls = modrinth_loaders(loader)
+        ls = modrinth_loaders(loader) if kind == "mod" else []
         if ls:
             params["loaders"] = json.dumps(ls)
         vs = self._get("/project/%s/version" % project_id, params)
+        if not vs and kind != "mod":
+            # ресурс-паки и шейдеры обычно работают и на соседних версиях игры — берём самую свежую
+            vs = self._get("/project/%s/version" % project_id)
+            for v in vs:
+                v["_other_mc"] = True
         if not vs:
             return None
         # релиз лучше беты; для Quilt родные моды лучше Fabric-модов
@@ -154,10 +163,11 @@ class CurseForge:
                 raise ModsError("CurseForge отклонил API-ключ. Проверьте его в настройках.")
             raise
 
-    def search(self, query, mc, loader, offset=0, sort="downloads", limit=20):
+    def search(self, query, mc, loader, offset=0, sort="downloads", limit=20, kind="mod"):
         sort_field = {"downloads": 6, "relevance": 2, "updated": 3, "newest": 11}.get(sort, 2)
-        r = self._get("/mods/search", {"gameId": CF_GAME, "classId": CF_CLASS_MODS, "searchFilter": query,
-                                       "gameVersion": mc, "modLoaderType": CF_LOADER.get(loader),
+        r = self._get("/mods/search", {"gameId": CF_GAME, "classId": CF_CLASS[kind], "searchFilter": query,
+                                       "gameVersion": mc,
+                                       "modLoaderType": CF_LOADER.get(loader) if kind == "mod" else None,
                                        "sortField": sort_field, "sortOrder": "desc", "index": offset,
                                        "pageSize": limit})
         hits = []
@@ -168,7 +178,7 @@ class CurseForge:
                 "description": m.get("summary", ""), "downloads": int(m.get("downloadCount", 0)),
                 "icon_url": ((m.get("logo") or {}).get("thumbnailUrl") or ""),
                 "categories": [c.get("name", "") for c in m.get("categories", [])[:3]],
-                "page_url": (m.get("links") or {}).get("websiteUrl") or "https://www.curseforge.com/minecraft/mc-mods/%s" % m.get("slug"),
+                "page_url": (m.get("links") or {}).get("websiteUrl") or "https://www.curseforge.com/minecraft/%s/%s" % (CF_PAGE[kind], m.get("slug")),
             })
         total = (r.get("pagination") or {}).get("totalCount", len(hits))
         return hits, total
@@ -188,9 +198,9 @@ class CurseForge:
             "version_type": {1: "release", 2: "beta", 3: "alpha"}.get(f.get("releaseType"), "release"),
         }
 
-    def best_file(self, project_id, mc, loader):
-        r = self._get("/mods/%s/files" % project_id, {"gameVersion": mc, "modLoaderType": CF_LOADER.get(loader),
-                                                      "pageSize": 50})
+    def best_file(self, project_id, mc, loader, kind="mod"):
+        r = self._get("/mods/%s/files" % project_id, {
+            "gameVersion": mc, "modLoaderType": CF_LOADER.get(loader) if kind == "mod" else None, "pageSize": 50})
         files = r.get("data", [])
         if not files:
             return None
@@ -484,8 +494,11 @@ def _pretty_spec(spec):
 #  Папка mods
 # =====================================================================================
 class ModFolder:
-    def __init__(self, path):
+    """Папка mods (или resourcepacks/shaderpacks с ext=".zip") и индекс скачанных лаунчером файлов."""
+
+    def __init__(self, path, ext=".jar"):
         self.path = path
+        self.ext = ext
         self.index_path = os.path.join(path, INDEX_NAME)
         src = self.index_path
         if not os.path.isfile(src) and os.path.isfile(os.path.join(path, OLD_INDEX_NAME)):
@@ -510,7 +523,7 @@ class ModFolder:
             return []
         res = []
         for fn in sorted(os.listdir(self.path), key=str.lower):
-            if not (fn.endswith(".jar") or fn.endswith(".jar.disabled")):
+            if not (fn.endswith(self.ext) or fn.endswith(self.ext + ".disabled")):
                 continue
             p = os.path.join(self.path, fn)
             base = self.base_name(fn)

@@ -118,5 +118,56 @@ class MrpackTest(unittest.TestCase):
         self.assertTrue(all(t.sha1 == SHA for t in tasks))
 
 
+class ExportTest(unittest.TestCase):
+    def setUp(self):
+        self.game = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.game, True)
+        for rel, data in (("mods/a.jar", b"A"), ("mods/b.jar", b"B"), ("mods/off.jar.disabled", b"x"),
+                          ("mods/readme.txt", b"x"), ("resourcepacks/rp.zip", b"R"), ("shaderpacks/s.zip", b"S"),
+                          ("config/a.toml", b"c"), ("config/sub/b.json", b"c"), ("saves/w/level.dat", b"w")):
+            p = os.path.join(self.game, *rel.split("/"))
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "wb") as f:
+                f.write(data)
+
+    def test_scan(self):
+        files, disabled = mrpack.scan(self.game)
+        self.assertEqual([f["path"] for f in files],
+                         ["mods/a.jar", "mods/b.jar", "resourcepacks/rp.zip", "shaderpacks/s.zip"])
+        self.assertEqual(disabled, ["off.jar.disabled"])
+        self.assertEqual(files[0]["sha1"], "6dcd4ce23d88e2ee9568ba546c007c63d9131c1b")  # sha1(b"A")
+        self.assertEqual(files[0]["size"], 1)
+        self.assertEqual([r for r, _p in mrpack.config_files(self.game)], ["config/a.toml", "config/sub/b.json"])
+
+    def test_roundtrip(self):
+        files, _ = mrpack.scan(self.game)
+        a = files[0]
+        urls = {a["sha1"]: "https://cdn.modrinth.com/data/x/versions/y/a.jar"}
+        idx = mrpack.build_index("My Pack", "2.0", "desc", "1.21.1", "neoforge", "21.1.77", files, urls)
+        self.assertEqual(idx["dependencies"], {"minecraft": "1.21.1", "neoforge": "21.1.77"})
+        embed = [(f["path"], f["abs"]) for f in files if f["sha1"] not in urls] + mrpack.config_files(self.game)
+        out = os.path.join(self.game, "out.mrpack")
+        mrpack.write(out, idx, embed)
+        self.assertFalse(os.path.exists(out + ".tmp"))
+        p = mrpack.read(out)
+        self.assertEqual((p["name"], p["version"], p["summary"], p["loader"]), ("My Pack", "2.0", "desc", "neoforge"))
+        self.assertEqual([(f["path"], f["sha1"]) for f in p["files"]], [("mods/a.jar", a["sha1"])])
+        self.assertEqual(p["overrides"], 5)
+        target = os.path.join(self.game, "target")
+        mrpack.extract_overrides(out, target)
+        with open(os.path.join(target, "mods", "b.jar"), "rb") as f:
+            self.assertEqual(f.read(), b"B")
+        self.assertTrue(os.path.isfile(os.path.join(target, "config", "sub", "b.json")))
+
+    def test_identify_uses_matching_file(self):
+        files, _ = mrpack.scan(self.game)
+        h = files[0]["sha1"]
+        resp = {h: {"files": [{"hashes": {"sha1": "other"}, "url": "https://cdn.modrinth.com/other.jar"},
+                              {"hashes": {"sha1": h}, "url": "https://cdn.modrinth.com/a.jar"}]},
+                files[1]["sha1"]: {"files": [{"hashes": {"sha1": files[1]["sha1"]}, "url": "https://evil.example/b.jar"}]}}
+        with mock.patch.object(mrpack.net, "post_json", return_value=resp):
+            self.assertEqual(mrpack.identify(files), {h: "https://cdn.modrinth.com/a.jar"})
+
+
 if __name__ == "__main__":
     unittest.main()
