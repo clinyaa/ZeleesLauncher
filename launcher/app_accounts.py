@@ -4,9 +4,10 @@ import os
 import threading
 import time
 import tkinter as tk
+import webbrowser
 from tkinter import messagebox
 
-from . import auth, net
+from . import auth, net, premium
 from .app_util import log_to_file
 from .config import APP_NAME, CACHE_DIR
 from .dialogs import MsLoginDialog
@@ -105,6 +106,19 @@ class AccountsMixin:
     def open_premium(self):
         PremiumDialog(self)
 
+    def open_web_account(self, page="/account"):
+        """Личный кабинет на сайте (статус Premium, статистика серверов, профиль) — сразу с входом."""
+        self.status("Открываю личный кабинет...")
+
+        def done(url, err):
+            if err:
+                self.status("Не удалось открыть личный кабинет: %s" % err, C["err"])
+                webbrowser.open(premium.API_HOSTS[0] + page)  # там можно войти через Microsoft
+                return
+            self.status("Личный кабинет открыт в браузере", C["accent"])
+            webbrowser.open(url)
+        self.ms_call(lambda acc: self.premium.web_link(acc, page), done)
+
     def ms_call(self, fn, done):
         """fn(acc) в фоне со свежим токеном лицензионного аккаунта; затем done(result, error) в окне."""
         acc = self.current_ms_account()
@@ -162,6 +176,8 @@ class AccountsMixin:
         m.add_separator()
         m.add_command(label="★   Premium…", command=self.open_premium, foreground=C["gold"],
                       activeforeground=C["gold"])
+        if self.current_ms_account():
+            m.add_command(label="     Личный кабинет на сайте", command=self.open_web_account)
         if self.cur_acc_key:
             acc = self.accounts.find(self.cur_acc_key)
             m.add_separator()

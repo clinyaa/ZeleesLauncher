@@ -169,6 +169,8 @@ class Premium:
                 st["premium_until"] = r["premium_until"]
                 if "boosty" in r:
                     st["boosty"] = r["boosty"]
+                if "ref" in r:
+                    st["ref"] = r["ref"]
                 self._save()
             return r
         raise ApiError("Не удалось войти на сайт")
@@ -184,6 +186,15 @@ class Premium:
     def boosty_code(self, acc):
         """Код ZL-…, который игрок отправляет автору в личные сообщения на Boosty."""
         return self.authed(acc, "POST", "/api/boosty/code")
+
+    # ---- партнёрская программа
+    def ref(self, uuid):
+        """Из последнего ответа сайта: {"invited_by", "can_enter", "percent"}."""
+        return (self.state.get(uuid) or {}).get("ref") or {}
+
+    def ref_code(self, acc, code):
+        """Код партнёра (до первой покупки Premium): засчитывает приглашение партнёру."""
+        return self.authed(acc, "POST", "/api/ref", {"code": code})
 
     # ---- сервера
     def load_info(self):
@@ -201,3 +212,8 @@ class Premium:
 
     def delete_server(self, acc, sid):
         return self.authed(acc, "DELETE", "/api/servers/%d" % int(sid))
+
+    # ---- личный кабинет на сайте
+    def web_link(self, acc, page="/account"):
+        """Одноразовая ссылка (2 минуты), которая открывает личный кабинет в браузере без входа Microsoft."""
+        return self.authed(acc, "POST", "/api/web/link", {"next": page})["url"]

@@ -221,7 +221,8 @@ class ServersPage:
         tk.Label(t, text=e["name"], bg=C["panel"], fg=C["fg"], font=self.F.b(12, "bold")).pack(side="left")
         if mine:
             tk.Label(t, text="  ★ ваш сервер", bg=C["panel"], fg=C["gold"], font=self.F.b(9, "bold")).pack(side="left")
-            for text, cmd in (("Удалить", lambda: self._delete(e)), ("Изменить", lambda: ServerDialog(self, e))):
+            for text, cmd in (("Удалить", lambda: self._delete(e)), ("Изменить", lambda: ServerDialog(self, e)),
+                              ("Статистика", lambda: self.app.open_web_account("/account/server/%d" % e["id"]))):
                 lb = tk.Label(t, text=text, bg=C["panel"], fg=C["muted"], font=self.F.b(9, "underline"),
                               cursor="hand2")
                 lb.pack(side="right", padx=(px(10), 0))
@@ -649,7 +650,8 @@ class PremiumDialog:
         self.state.pack(anchor="w", pady=(0, px(12)))
 
         for line in ("Свой сервер во вкладке «Сервера» — его увидят все игроки лаунчера",
-                     "Золотой значок Premium рядом с ником",
+                     "Статистика онлайна вашего сервера: графики и пиковые часы",
+                     "Золотой значок Premium рядом с ником и в профиле на сайте",
                      "Поддержка развития ZeleesLauncher"):
             r = tk.Frame(f, bg=C["panel"])
             r.pack(fill="x", pady=px(2))
@@ -671,9 +673,28 @@ class PremiumDialog:
                       font=app.F.b(9, "underline"), cursor="hand2")
         cc.pack(side="right", padx=px(12))
         cc.bind("<Button-1>", lambda e: self._copy_code())
+        # код партнёра: виден, пока его ещё можно указать (до первой покупки), потом — кто пригласил
+        self.ref_box = tk.Frame(f, bg=C["panel"])
+        self.ref_row = tk.Frame(self.ref_box, bg=C["panel"])
+        self.ref_row.pack(fill="x")
+        tk.Label(self.ref_row, text="Есть код партнёра?", bg=C["panel"], fg=C["fg"], font=app.F.b(10, "bold")).pack(
+            side="left")
+        self.ref_var = tk.StringVar()
+        ef, self.ref_entry = make_entry(self.ref_row, app.A, self.ref_var, width=10, font=(app.F.mono, 11))
+        ef.pack(side="left", padx=px(10))
+        self.ref_btn = tk.Label(self.ref_row, text="Применить", bg=C["panel"], fg=C["accent"],
+                                font=app.F.b(9, "underline"), cursor="hand2")
+        self.ref_btn.pack(side="left")
+        self.ref_btn.bind("<Button-1>", lambda e: self._apply_ref())
+        self.ref_entry.bind("<Return>", lambda e: self._apply_ref())
+        self.ref_info = tk.Label(self.ref_box, text="", bg=C["panel"], fg=C["muted"], font=app.F.b(9), justify="left",
+                                 wraplength=px(470))
+        self.ref_info.pack(anchor="w")
+        self.idf = None
         if self.acc:
             idf = tk.Frame(f, bg=C["panel2"])
             idf.pack(fill="x", pady=(px(12), 0))
+            self.idf = idf
             tk.Label(idf, text="Ваш аккаунт:  %s" % self.acc["name"], bg=C["panel2"], fg=C["fg"],
                      font=app.F.b(10, "bold")).pack(side="left", padx=px(12), pady=px(8))
             cp = tk.Label(idf, text="Скопировать ник и UUID", bg=C["panel2"], fg=C["accent"],
@@ -719,12 +740,44 @@ class PremiumDialog:
         if note:
             text += "\n" + note
         self.state.configure(text=text, fg=color or col)
+        self._render_ref()
         active = self.acc and self.app.premium.is_premium(self.acc["id"])
         if self.boosty_url and self.acc:
             label = "Открыть Boosty" if self.app.premium.boosty(self.acc["id"]).get("active") else "Оплатить через Boosty"
         else:
             label = "Продлить" if active else "Купить"
         self.buy.config_pill(text=label)
+
+    def _render_ref(self, note=None, color=None):
+        ref = self.app.premium.ref(self.acc["id"]) if self.acc else {}
+        show = bool(ref.get("can_enter") or ref.get("invited_by") or note)
+        if show and not self.ref_box.winfo_ismapped() and self.idf is not None:
+            self.ref_box.pack(fill="x", pady=(self.app.px(14), 0), before=self.idf)
+        elif not show and self.ref_box.winfo_ismapped():
+            self.ref_box.pack_forget()
+        if ref.get("invited_by"):
+            self.ref_row.pack_forget()
+            self.ref_info.configure(text=note or "Вас пригласил %s — спасибо, что пришли по приглашению!"
+                                    % ref["invited_by"], fg=color or C["accent"])
+        else:
+            self.ref_info.configure(text=note or "Если вас пригласил друг, введите его код до первой оплаты — "
+                                                 "он получит бонус.", fg=color or C["dim"])
+
+    def _apply_ref(self):
+        code = self.ref_var.get().strip()
+        if not code or not self.acc:
+            return
+        self._render_ref("Проверяю код...", C["muted"])
+
+        def done(_res, err):
+            if not self.d.winfo_exists():
+                return
+            if err:
+                self._render_ref(str(err), C["err"])
+                return
+            self._render_ref()
+            self.d.center()
+        self.app.ms_call(lambda acc: self.app.premium.ref_code(acc, code), done)
 
     def _apply_info(self, info):
         self.boosty_url = info.get("boosty_url") or ""
