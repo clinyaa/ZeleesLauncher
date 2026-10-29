@@ -5,7 +5,7 @@ import sys
 import threading
 
 APP_NAME = "ZeleesLauncher"
-APP_VERSION = "1.1.4"
+APP_VERSION = "1.1.5"
 
 # Откуда лаунчер берёт обновления. Заполняется один раз (см. tools/publish_update.py):
 # "https://github.com/<владелец>/<репозиторий>/releases/latest/download/update.json"
