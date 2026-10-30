@@ -196,6 +196,16 @@ class Premium:
         """Код партнёра (до первой покупки Premium): засчитывает приглашение партнёру."""
         return self.authed(acc, "POST", "/api/ref", {"code": code})
 
+    # ---- время в игре
+    def playtime(self, acc, sessions):
+        """Сессии из playtime.Playtime.pending() — в личный кабинет."""
+        return self.authed(acc, "POST", "/api/playtime", {"sessions": [
+            {k: s[k] for k in ("version", "server", "seconds")} for s in sessions]})
+
+    # ---- подарочный код
+    def gift(self, acc, code):
+        return self.authed(acc, "POST", "/api/gift", {"code": code})
+
     # ---- сервера
     def load_info(self):
         self.info = call("GET", "/api/info", timeout=10)

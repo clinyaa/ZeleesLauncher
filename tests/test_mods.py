@@ -193,3 +193,59 @@ class CompatTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PreflightTest(unittest.TestCase):
+    """Проверка папки mods перед запуском игры (без интернета)."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def fabric(self, name, mod_id, version="1.0", depends=None, breaks=None, mc="1.21.4"):
+        path = os.path.join(self.dir, name)
+        d = {"id": mod_id, "name": mod_id.title(), "version": version, "depends": dict({"minecraft": mc}, **(depends or {}))}
+        if breaks:
+            d["breaks"] = breaks
+        with zipfile.ZipFile(path, "w") as z:
+            z.writestr("fabric.mod.json", json.dumps(d))
+        return path
+
+    def test_clean_folder(self):
+        self.fabric("api.jar", "fabric-api")
+        self.fabric("sodium.jar", "sodium", depends={"fabric-api": "*"})
+        self.assertEqual(mods.preflight(self.dir, "1.21.4", "fabric"), [])
+
+    def test_problems_found(self):
+        self.fabric("sodium.jar", "sodium", "0.6.0", depends={"fabric-api": "*"})
+        self.fabric("sodium-old.jar", "sodium", "0.5.0")
+        self.fabric("old.jar", "oldmod", mc="1.20.1")
+        self.fabric("of.jar", "optifabric", "1.14.3")
+        self.fabric("iris.jar", "iris", breaks={"optifabric": "*"})
+        p = mods.preflight(self.dir, "1.21.4", "fabric")
+        text = "\n".join(p)
+        self.assertIn("не хватает fabric-api", text)
+        self.assertIn("«Sodium» установлен 2 раза: sodium-old.jar, sodium.jar", text)
+        self.assertIn("«Oldmod» — мод рассчитан на Minecraft 1.20.1", text)
+        self.assertIn("«Iris» несовместим с «Optifabric» 1.14.3", text)
+
+    def test_breaks_version_range(self):
+        self.fabric("modmenu.jar", "modmenu", "9.0.0+mc1.21")
+        self.fabric("a.jar", "amod", breaks={"modmenu": "<8.0"})
+        self.fabric("b.jar", "bmod", breaks={"modmenu": ">=9"})
+        p = mods.preflight(self.dir, "1.21.4", "fabric")
+        self.assertEqual(p, ["«Bmod» несовместим с «Modmenu» 9.0.0+mc1.21"])
+
+    def test_disabled_mods_ignored(self):
+        self.fabric("old.jar.disabled", "oldmod", mc="1.20.1")
+        self.assertEqual(mods.preflight(self.dir, "1.21.4", "fabric"), [])
+
+    def test_forge_incompatible(self):
+        toml = MODS_TOML.replace('modId="jei"\ntype="optional"', 'modId="rubidium"\ntype="incompatible"\n'
+                                                                    'versionRange="[0.6,)"')
+        path = os.path.join(self.dir, "ex.jar")
+        with zipfile.ZipFile(path, "w") as z:
+            z.writestr("META-INF/mods.toml", toml)
+        m = mods.read_jar_meta(path)
+        self.assertEqual(m["breaks"], [("rubidium", "maven", "[0.6,)")])
+        self.assertEqual(m["deps"], ["geckolib"])

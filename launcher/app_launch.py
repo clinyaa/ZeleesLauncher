@@ -171,29 +171,56 @@ class LaunchMixin:
             self.ui(self._set_busy, False)
 
     def _precheck_mods(self, vid, vdata, game_dir):
-        """Быстрая проверка модов перед запуском (без интернета, по метаданным jar)."""
+        """Проверка модов перед запуском (без интернета, по метаданным jar). Если что-то не так — спрашиваем."""
         from . import loaders, mods
         ld, _lv, mc = loaders.detect(vdata)
         mdir = os.path.join(game_dir, "mods")
         if not ld or not os.path.isdir(mdir):
             return
         try:
-            res = mods.check_folder(mods.ModFolder(mdir), mc, ld, online=False)
-        except Exception:  # noqa: BLE001
+            problems = mods.preflight(mdir, mc, ld)
+        except Exception as e:  # noqa: BLE001
+            self.ui(self.log, "Проверка модов не удалась: %s" % e, "WARN")
             return
-        bad = [r for r in res if r["enabled"] and r["status"] == "bad"]
-        miss = [r for r in res if r["enabled"] and r["missing"]]
-        for r in bad:
-            self.ui(self.log, "Несовместимый мод: %s — %s" % (r["title"], r["reason"]), "WARN")
-        for r in miss:
-            self.ui(self.log, "Мод %s: не хватает %s" % (r["title"], ", ".join(m["name"] for m in r["missing"])),
-                    "WARN")
-        if bad or miss:
-            self.ui(self.status, "Внимание: проблемы с модами (%d) — игра может не запуститься. См. «Моды»"
-                    % (len(bad) + len(miss)), C["warn"])
+        if not problems:
+            return
+        for p in problems:
+            self.ui(self.log, "Моды: " + p, "WARN")
+        shown = problems[:8] + (["…и ещё %d" % (len(problems) - 8)] if len(problems) > 8 else [])
+        ans = self._ask_ui(lambda: messagebox.askyesnocancel(
+            APP_NAME, "С модами в сборке %s проблемы — игра может не запуститься или вылететь:\n\n• %s\n\n"
+                      "Да — запустить всё равно\nНет — открыть «Моды → Установленные» и исправить"
+                      % (vid, "\n• ".join(shown)), icon="warning", parent=self.root))
+        if ans:
+            return
+        if ans is False:
+            self.ui(self._open_installed_mods)
+        raise net.Cancelled()
+
+    def _open_installed_mods(self):
+        self.show_page("mods")
+        self.mods_page._set_mode("installed")
+
+    def _ask_ui(self, fn):
+        """fn() в потоке окна (диалог), фоновый поток ждёт ответ. Окно закрыли — None."""
+        import threading
+        done, box = threading.Event(), []
+
+        def run():
+            try:
+                box.append(fn())
+            finally:
+                done.set()
+        self.ui(run)
+        while not done.wait(0.2):
+            if self.closed:
+                return None
+        return box[0] if box else None
 
     def _game_started(self, settings, vdata=None, server=None):
         self.status("Игра запущена — приятной игры!", C["accent"])
+        acc = self.current_ms_account()
+        self.playtime.start((vdata or {}).get("id") or self.selected_vid, server, acc["id"] if acc else None)
         if vdata and settings.get("discord_rpc", True):
             from . import discord_rpc, loaders
             ld, _lv, mc = loaders.detect(vdata)
@@ -204,6 +231,9 @@ class LaunchMixin:
 
     def _game_exited(self, code):
         self.kill_btn.config_pill(enabled=False)
+        if self.playtime.stop():
+            self._update_home()
+            self.send_playtime()
         self.discord.clear()
         self.root.deiconify()
         if code == 0:

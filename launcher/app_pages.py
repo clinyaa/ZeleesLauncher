@@ -8,6 +8,7 @@ from tkinter import ttk
 from . import news
 from .app_util import fmt_date, hero_kind, open_path, spaced, total_ram_mb
 from .config import APP_NAME, APP_VERSION, DATA_DIR
+from .playtime import fmt_hours
 from .ui_kit import C, CPill, GoldBadge, PillButton, ScrollFrame, Slider, Switch, make_entry
 from .versions import TYPE_NAMES, is_installed
 
@@ -126,6 +127,9 @@ class PagesMixin:
         else:
             parts.append("Модифицированная / локальная")
         parts.append("установлена" if is_installed(root, vid) else "будет скачана при запуске")
+        played = self.playtime.seconds("versions", vid)
+        if played >= 60:
+            parts.append("наиграно " + fmt_hours(played))
         cv.itemconfigure(self.h_meta, text="   ·   ".join(p for p in parts if p))
         if entry and entry.get("id") == self.manifest.latest.get("release"):
             cv.itemconfigure(self.h_kicker, text=spaced("MINECRAFT") + "   ·   ПОСЛЕДНИЙ РЕЛИЗ")

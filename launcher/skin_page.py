@@ -1,5 +1,6 @@
 """Вкладка «Скин»: 3D-превью, смена скина и модели, библиотека скинов, плащи (для лицензии)."""
 import hashlib
+import json
 import math
 import os
 import threading
@@ -13,6 +14,11 @@ from .ui_kit import C, PillButton, face_photo
 
 SKINS_DIR = os.path.join(DATA_DIR, "skins")
 TEX_CACHE = os.path.join(CACHE_DIR, "textures")
+VARIANTS_FILE = "variants.json"  # модель для каждого скина библиотеки
+LIB_MAX = 18  # плиток в библиотеке вместе с «+»
+LIB_ROW = 9
+LIB_HINT = ("Клик — примерить, двойной — редактировать, правый — надеть сразу или удалить. "
+            "Золотая рамка — скин на аккаунте")
 
 
 class SkinPage:
@@ -27,6 +33,7 @@ class SkinPage:
         self.capes = []           # [(id, alias, Image|None, active)]
         self.preview = None       # (path, bytes, Image) — скин из библиотеки до применения
         self.preview_slim = False
+        self.worn_sha = None      # sha1 скина, который сейчас на аккаунте
         self.faces = []
         self.yaw, self.pitch = 0.45, 0.2
         self.auto = True
@@ -91,6 +98,7 @@ class SkinPage:
             self.acc = acc
             self.preview = None
             self.profile = None
+            self.worn_sha = None
             self.capes = []
             self.cape = None
             if acc and acc.get("type") == "microsoft":
@@ -260,13 +268,16 @@ class SkinPage:
         files = []
         if os.path.isdir(SKINS_DIR):
             files = sorted((os.path.join(SKINS_DIR, f) for f in os.listdir(SKINS_DIR) if f.lower().endswith(".png")),
-                           key=os.path.getmtime, reverse=True)[:9]
-        add = tk.Canvas(parent, width=px(52), height=px(52), bg=C["panel2"], highlightthickness=1,
+                           key=os.path.getmtime, reverse=True)[:LIB_MAX - 1]
+        rows = [tk.Frame(parent, bg=C["bg"])]
+        rows[0].pack(fill="x")
+        add = tk.Canvas(rows[0], width=px(52), height=px(52), bg=C["panel2"], highlightthickness=1,
                         highlightbackground=C["line"], cursor="hand2")
         add.create_text(px(26), px(26), text="+", fill=C["muted"], font=self.F.t(18))
         add.pack(side="left", padx=(0, px(8)))
         add.bind("<Button-1>", lambda e: self._choose_file())
         self._tiles = []
+        n = 1
         for path in files:
             try:
                 with open(path, "rb") as f:
@@ -274,19 +285,75 @@ class SkinPage:
                 img = skins.validate_skin(data)
             except Exception:  # noqa: BLE001
                 continue
+            if n % LIB_ROW == 0:
+                rows.append(tk.Frame(parent, bg=C["bg"]))
+                rows[-1].pack(fill="x", pady=(px(6), 0))
+            n += 1
             photo = face_photo(skins.head_pixels(img), px(40) // 8 * 8)
             self._tiles.append(photo)
             sel = self.preview and self.preview[0] == path
-            t = tk.Label(parent, image=photo, bg=C["panel2"], highlightthickness=2,
-                         highlightbackground=C["accent"] if sel else C["line"], cursor="hand2", padx=px(4), pady=px(4))
+            worn = self.worn_sha and hashlib.sha1(data).hexdigest() == self.worn_sha
+            t = tk.Label(rows[-1], image=photo, bg=C["panel2"], highlightthickness=2,
+                         highlightbackground=C["accent"] if sel else C["gold"] if worn else C["line"], cursor="hand2",
+                         padx=px(4), pady=px(4))
             t.pack(side="left", padx=(0, px(8)))
             t.bind("<Button-1>", lambda e, p=path, d=data, i=img: self._preview(p, d, i))
-            t.bind("<Button-3>", lambda e, p=path: self._delete_lib(p))
+            t.bind("<Button-3>", lambda e, p=path, d=data, i=img: self._lib_menu(e, p, d, i))
             t.bind("<Double-Button-1>", lambda e, p=path, i=img: self.editor.open(
                 i, os.path.splitext(os.path.basename(p))[0]))
+            t.bind("<Enter>", lambda e: self._tile_hint(True))
+            t.bind("<Leave>", lambda e: self._tile_hint(False))
         if not files:
-            self.app._label(parent, "Здесь будут ваши скины — загруженные и прошлые", muted=True, size=9).pack(
+            self.app._label(rows[0], "Здесь будут ваши скины — загруженные и прошлые", muted=True, size=9).pack(
                 side="left")
+
+    def _tile_hint(self, on):
+        if on:
+            self._set_status(LIB_HINT)
+        elif self.status.cget("text") == LIB_HINT:
+            self._set_status("")
+
+    def _lib_menu(self, e, path, data, img):
+        m = tk.Menu(self.app.root, tearoff=0, bg=C["panel2"], fg=C["fg"], activebackground=C["sel"],
+                    activeforeground="white", bd=0, relief="flat", font=self.F.b(10))
+        if self.acc and self.acc.get("type") == "microsoft":
+            m.add_command(label="Надеть на аккаунт", command=lambda: self._wear(path, data, img))
+        m.add_command(label="Редактировать", command=lambda: self.editor.open(
+            img, os.path.splitext(os.path.basename(path))[0]))
+        m.add_separator()
+        m.add_command(label="Удалить из библиотеки", command=lambda: self._delete_lib(path))
+        m.tk_popup(e.x_root, e.y_root)
+
+    def _wear(self, path, data, img):
+        """Сразу ставит скин из библиотеки на аккаунт (с запомненной для него моделью)."""
+        self.preview = (path, data, img)
+        self.preview_slim = self._lib_variant(path, img)
+        self._rebuild_model()
+        self._draw_right()
+        self._apply_preview()
+
+    # ---- модель (классическая / тонкие руки), запомненная для каждого скина библиотеки
+    def _variants(self):
+        try:
+            with open(os.path.join(SKINS_DIR, VARIANTS_FILE), encoding="utf-8") as f:
+                v = json.load(f)
+            return v if isinstance(v, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _lib_variant(self, path, img):
+        v = self._variants().get(os.path.basename(path))
+        return v == "slim" if v in ("slim", "classic") else skins.guess_slim(img)
+
+    def _remember_variant(self, path, slim):
+        v = self._variants()
+        v[os.path.basename(path)] = "slim" if slim else "classic"
+        try:
+            os.makedirs(SKINS_DIR, exist_ok=True)
+            with open(os.path.join(SKINS_DIR, VARIANTS_FILE), "w", encoding="utf-8") as f:
+                json.dump(v, f, ensure_ascii=False, indent=1)
+        except OSError:
+            pass
 
     def _cape_tile(self, parent, cid, alias, img, active):
         px = self.px
@@ -359,7 +426,9 @@ class SkinPage:
             data = skins.fetch_texture(sk["url"], TEX_CACHE)
             skin_img = skins.decode_png(data)
             slim = (sk.get("variant", "CLASSIC").upper() == "SLIM")
-            self._save_to_library(data, "%s_%s" % (prof.get("name", "skin"), hashlib.sha1(data).hexdigest()[:8]))
+            lp = self._save_to_library(data, "%s_%s" % (prof.get("name", "skin"), hashlib.sha1(data).hexdigest()[:8]))
+            self._remember_variant(lp, slim)
+            self.worn_sha = hashlib.sha1(data).hexdigest()
         capes = []
         cape_img = None
         for c in prof.get("capes") or []:
@@ -419,7 +488,7 @@ class SkinPage:
 
     def _preview(self, path, data, img):
         self.preview = (path, data, img)
-        self.preview_slim = skins.guess_slim(img)
+        self.preview_slim = self._lib_variant(path, img)
         self._rebuild_model()
         self._draw_right()
         if self.acc and self.acc.get("type") == "microsoft":
@@ -466,6 +535,7 @@ class SkinPage:
     def _apply_preview(self):
         path, data, _img = self.preview
         variant = "slim" if self.preview_slim else "classic"
+        self._remember_variant(path, self.preview_slim)
 
         def work():
             prof = self._api(skins.upload_skin, data, variant)

@@ -159,9 +159,25 @@ class AccountsMixin:
 
         def finished(res, err, uid=acc["id"]):
             self._premium_syncing.discard(uid)
+            if not err:
+                self.send_playtime()
             if done:
                 done(res, err)
         self.ms_call(self.premium.me, finished)
+
+    def send_playtime(self):
+        """Неотправленные сессии текущего аккаунта — в личный кабинет на сайте (если не получится, позже)."""
+        acc = self.current_ms_account()
+        pend = self.playtime.pending(acc["id"]) if acc else []
+        if not pend or getattr(self, "_playtime_sending", False):
+            return
+        self._playtime_sending = True
+
+        def done(_res, err):
+            self._playtime_sending = False
+            if not err:
+                self.playtime.sent(pend)
+        self.ms_call(lambda a: self.premium.playtime(a, pend), done)
 
     def _account_menu(self):
         m = tk.Menu(self.root, tearoff=0, bg=C["panel2"], fg=C["fg"], activebackground=C["sel"],

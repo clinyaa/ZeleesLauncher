@@ -263,23 +263,28 @@ def read_jar_meta(path):
                         mc = ("fabric", dep.get("versions", "*"))
                     elif not dep.get("optional"):
                         deps.append(dep.get("id"))
+            breaks = [(b, "fabric", "*") if isinstance(b, str) else (b.get("id"), "fabric", b.get("versions", "*"))
+                      for b in ql.get("breaks", []) or [] if isinstance(b, (str, dict))]
             return {"loader": "quilt", "ids": [ql.get("id", "")] + [p if isinstance(p, str) else p.get("id", "")
                                                                    for p in ql.get("provides", [])],
                     "name": meta.get("name") or ql.get("id"), "version": ql.get("version", ""),
-                    "mc": mc, "deps": [x for x in deps if x and x not in BUILTIN_DEPS]}
+                    "mc": mc, "deps": [x for x in deps if x and x not in BUILTIN_DEPS],
+                    "breaks": [b for b in breaks if b[0] and b[0] not in BUILTIN_DEPS]}
         if "fabric.mod.json" in names:
             d = _json(z.read("fabric.mod.json"))
             dep = d.get("depends") or {}
             mc = ("fabric", dep.get("minecraft")) if "minecraft" in dep else None
             return {"loader": "fabric", "ids": [d.get("id", "")] + list(d.get("provides", []) or []),
                     "name": d.get("name") or d.get("id"), "version": d.get("version", ""), "mc": mc,
-                    "deps": [k for k in dep if k not in BUILTIN_DEPS]}
+                    "deps": [k for k in dep if k not in BUILTIN_DEPS],
+                    "breaks": [(k, "fabric", v) for k, v in (d.get("breaks") or {}).items()
+                               if k not in BUILTIN_DEPS]}
         for toml_name, loader in (("META-INF/neoforge.mods.toml", "neoforge"), ("META-INF/mods.toml", "forge")):
             if toml_name in names:
                 t = _toml(z.read(toml_name).decode("utf-8", "replace"))
                 mods = t.get("mods") or [{}]
                 ids = [m.get("modId", "") for m in mods]
-                deps, mc = [], None
+                deps, breaks, mc = [], [], None
                 dep_tables = t.get("dependencies") or {}
                 for _mid, lst in dep_tables.items():
                     for dd in lst if isinstance(lst, list) else []:
@@ -287,14 +292,17 @@ def read_jar_meta(path):
                         required = dd.get("mandatory", dd.get("type", "required") == "required")
                         if isinstance(required, str):
                             required = required.lower() == "required"
-                        if mid == "minecraft":
+                        if str(dd.get("type", "")).lower() == "incompatible":
+                            if mid and mid not in BUILTIN_DEPS:
+                                breaks.append((mid, "maven", dd.get("versionRange", "")))
+                        elif mid == "minecraft":
                             mc = ("maven", dd.get("versionRange", ""))
                         elif mid == "neoforge":
                             loader = "neoforge"
                         elif required and mid and mid not in BUILTIN_DEPS:
                             deps.append(mid)
                 return {"loader": loader, "ids": ids, "name": mods[0].get("displayName") or ids[0],
-                        "version": mods[0].get("version", ""), "mc": mc, "deps": deps}
+                        "version": mods[0].get("version", ""), "mc": mc, "deps": deps, "breaks": breaks}
         if "mcmod.info" in names:
             d = _json(z.read("mcmod.info"))
             m = (d[0] if isinstance(d, list) and d else (d.get("modList") or [{}])[0] if isinstance(d, dict) else {})
@@ -626,9 +634,10 @@ def resolve_install(provider, mf, mc, loader, installed, log=None, depth=0, plan
     return plan
 
 
-def check_folder(folder, mc, loader, online=True):
+def check_folder(folder, mc, loader, online=True, metas=None):
     """Проверяет все моды в папке. Возвращает список dict с полями:
-    file, enabled, title, version, status ('ok'|'bad'|'unknown'), reason, update (mf|None), missing [ids]."""
+    file, enabled, title, version, status ('ok'|'bad'|'unknown'), reason, update (mf|None), missing [ids].
+    metas (dict) — если передан, в него кладутся метаданные jar по имени файла."""
     ents = folder.entries()
     sha = {}
     for e in ents:
@@ -649,7 +658,7 @@ def check_folder(folder, mc, loader, online=True):
             upd = {}
 
     results, all_ids, mr_projects = [], set(), set()
-    metas = {}
+    metas = {} if metas is None else metas
     for e in ents:
         meta = read_jar_meta(e["path"])
         metas[e["file"]] = meta
@@ -711,3 +720,51 @@ def check_folder(folder, mc, loader, online=True):
         except Exception:  # noqa: BLE001
             pass
     return results
+
+
+def _mod_vt(ver):
+    """Версия мода без суффиксов («0.5.8+mc1.21.1» -> (0, 5, 8)) или None."""
+    m = re.match(r"\d+(?:\.\d+)*", (ver or "").strip())
+    return tuple(int(x) for x in m.group(0).split(".")) if m else None
+
+
+def preflight(path, mc, loader):
+    """Проверка папки mods перед запуском, без интернета: -> список проблем (строки).
+    Несовместимые моды, недостающие зависимости, один мод в двух файлах, моды, которые явно ломают друг друга."""
+    metas = {}
+    res = check_folder(ModFolder(path), mc, loader, online=False, metas=metas)
+    problems = []
+    for r in res:
+        if not r["enabled"]:
+            continue
+        if r["status"] == "bad":
+            problems.append("«%s» — %s" % (r["title"], r["reason"]))
+        if r["missing"]:
+            problems.append("«%s»: не хватает %s" % (r["title"], ", ".join(m["name"] for m in r["missing"])))
+    enabled = {r["file"] for r in res if r["enabled"]}
+    on = {f: m for f, m in metas.items() if f in enabled and m}
+    files, have = {}, {}
+    for f, m in sorted(on.items()):
+        ids = [i for i in m.get("ids") or [] if i]
+        if ids:
+            files.setdefault(ids[0], []).append(f)
+        for i in ids:
+            have.setdefault(i, (m.get("version", ""), m.get("name") or i))
+    for mid, fs in sorted(files.items()):
+        if len(fs) > 1:
+            problems.append("«%s» установлен %d раза: %s" % (on[fs[0]].get("name") or mid, len(fs), ", ".join(fs)))
+    for f, m in sorted(on.items()):
+        for bid, kind, spec in m.get("breaks") or []:
+            if bid not in have or bid in (m.get("ids") or []):
+                continue
+            ver, name = have[bid]
+            if isinstance(spec, list):
+                spec = spec or "*"
+            if spec in ("*", "", None):
+                hit = True
+            else:
+                vt = _mod_vt(ver)
+                hit = vt is not None and (_fabric_match(spec, vt) if kind == "fabric" else _maven_match(spec, vt))
+            if hit:
+                problems.append("«%s» несовместим с «%s» %s" % (m.get("name") or f, name, ver))
+    return problems

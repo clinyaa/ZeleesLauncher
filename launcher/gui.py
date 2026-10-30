@@ -22,6 +22,7 @@ from . import crash_report, discord_rpc, fileopen, premium
 from .config import APP_NAME, Accounts, Settings, ensure_dirs
 from .dialogs import Dialog  # noqa: F401 - для старого кода, импортировавшего Dialog из gui
 from .mods_page import ModsPage
+from .playtime import Playtime
 from .premium import Premium
 from .servers_page import ServersPage
 from .skin_page import SkinPage
@@ -42,6 +43,7 @@ class App(PagesMixin, VersionsMixin, AccountsMixin, LaunchMixin, UpdateMixin):
         self.settings = Settings()
         self.accounts = Accounts()
         self.premium = Premium()
+        self.playtime = Playtime()
         self.discord = discord_rpc.Presence(log=log_to_file)
         self.reporter = crash_report.Reporter(
             self.settings, self._ask_crash_reports,

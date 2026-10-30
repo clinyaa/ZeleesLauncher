@@ -651,6 +651,7 @@ class PremiumDialog:
 
         for line in ("Свой сервер во вкладке «Сервера» — его увидят все игроки лаунчера",
                      "Статистика онлайна вашего сервера: графики и пиковые часы",
+                     "Страница в каталоге zelees.link/servers и баннер с онлайном для сайта",
                      "Золотой значок Premium рядом с ником и в профиле на сайте",
                      "Поддержка развития ZeleesLauncher"):
             r = tk.Frame(f, bg=C["panel"])
@@ -692,6 +693,22 @@ class PremiumDialog:
         self.ref_info.pack(anchor="w")
         self.idf = None
         if self.acc:
+            gf = tk.Frame(f, bg=C["panel"])
+            gf.pack(fill="x", pady=(px(14), 0))
+            gr = tk.Frame(gf, bg=C["panel"])
+            gr.pack(fill="x")
+            tk.Label(gr, text="Подарочный код:", bg=C["panel"], fg=C["fg"], font=app.F.b(10, "bold")).pack(side="left")
+            self.gift_var = tk.StringVar()
+            ef, self.gift_entry = make_entry(gr, app.A, self.gift_var, width=20, font=(app.F.mono, 11))
+            ef.pack(side="left", padx=px(10))
+            gb = tk.Label(gr, text="Активировать", bg=C["panel"], fg=C["accent"], font=app.F.b(9, "underline"),
+                          cursor="hand2")
+            gb.pack(side="left")
+            gb.bind("<Button-1>", lambda e: self._apply_gift())
+            self.gift_entry.bind("<Return>", lambda e: self._apply_gift())
+            self.gift_info = tk.Label(gf, text="", bg=C["panel"], fg=C["dim"], font=app.F.b(9), justify="left",
+                                      wraplength=px(470))
+            self.gift_info.pack(anchor="w")
             idf = tk.Frame(f, bg=C["panel2"])
             idf.pack(fill="x", pady=(px(12), 0))
             self.idf = idf
@@ -781,15 +798,36 @@ class PremiumDialog:
 
     def _apply_info(self, info):
         self.boosty_url = info.get("boosty_url") or ""
+        year = ("\nМожно оплатить сразу год: %s." % info["price_year"]) if info.get("price_year") else ""
         if self.boosty_url:
             self.how.configure(text="1. Нажмите «Оплатить через Boosty» — лаунчер покажет и скопирует ваш код.\n"
-                                    "2. Оформите на Boosty подписку уровня «Premium».\n"
+                                    "2. Оформите на Boosty подписку уровня «Premium»%s.\n"
                                     "3. Отправьте код автору в личные сообщения на Boosty.\n"
                                     "Premium включится сам в течение нескольких минут и будет продлеваться, "
-                                    "пока активна подписка.", fg="#c9ced8")
+                                    "пока активна подписка.%s"
+                                    % (" — на месяц или сразу на год" if year else "", year), fg="#c9ced8")
         elif info:
-            self.how.configure(text=info.get("contact_text") or "", fg="#c9ced8")
+            self.how.configure(text=((info.get("contact_text") or "") + year).strip(), fg="#c9ced8")
+        if self.acc and info.get("gift_text") and not self.gift_info.cget("text"):
+            self.gift_info.configure(text="Подарить Premium другу: " + info["gift_text"])
         self._render()
+
+    def _apply_gift(self):
+        code = self.gift_var.get().strip()
+        if not code or not self.acc:
+            return
+        self.gift_info.configure(text="Проверяю код...", fg=C["muted"])
+
+        def done(res, err):
+            if not self.d.winfo_exists():
+                return
+            if err:
+                self.gift_info.configure(text=str(err), fg=C["err"])
+                return
+            self.gift_var.set("")
+            self.gift_info.configure(text="★ " + res.get("message", "Код активирован"), fg=C["gold"])
+            self._render()
+        self.app.ms_call(lambda acc: self.app.premium.gift(acc, code), done)
 
     def _load_info(self):
         try:
