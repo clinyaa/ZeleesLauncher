@@ -1,4 +1,5 @@
 """Моды: поиск и скачивание (Modrinth, CurseForge), зависимости, проверка совместимости, папка mods."""
+import io
 import json
 import os
 import re
@@ -259,74 +260,155 @@ def providers(settings):
 # =====================================================================================
 #  Метаданные внутри jar (работает для модов с любых сайтов)
 # =====================================================================================
-def read_jar_meta(path):
-    """-> dict(loader, ids, name, version, mc_constraint, deps[]) или None."""
+def read_jar_meta(path, loader=None):
+    """-> dict(loader, ids, name, version, mc_constraint, deps[]) или None.
+
+    Универсальные jar (Fabric+Forge, Forge+NeoForge) несут описания для нескольких загрузчиков:
+    если передан loader сборки, берётся описание, подходящее ему, иначе первое по порядку."""
     try:
         z = zipfile.ZipFile(path)
     except (OSError, zipfile.BadZipFile):
         return None
     with z:
-        names = set(z.namelist())
-        if "quilt.mod.json" in names:
-            d = _json(z.read("quilt.mod.json"))
-            ql = d.get("quilt_loader", {})
-            meta = ql.get("metadata", {})
-            deps, mc = [], None
-            for dep in ql.get("depends", []):
-                if isinstance(dep, str):
-                    deps.append(dep)
-                elif isinstance(dep, dict):
-                    if dep.get("id") == "minecraft":
-                        mc = ("fabric", dep.get("versions", "*"))
-                    elif not dep.get("optional"):
-                        deps.append(dep.get("id"))
-            breaks = [(b, "fabric", "*") if isinstance(b, str) else (b.get("id"), "fabric", b.get("versions", "*"))
-                      for b in ql.get("breaks", []) or [] if isinstance(b, (str, dict))]
-            return {"loader": "quilt", "ids": [ql.get("id", "")] + [p if isinstance(p, str) else p.get("id", "")
-                                                                   for p in ql.get("provides", [])],
-                    "name": meta.get("name") or ql.get("id"), "version": ql.get("version", ""),
-                    "mc": mc, "deps": [x for x in deps if x and x not in BUILTIN_DEPS],
-                    "breaks": [b for b in breaks if b[0] and b[0] not in BUILTIN_DEPS]}
-        if "fabric.mod.json" in names:
-            d = _json(z.read("fabric.mod.json"))
-            dep = d.get("depends") or {}
-            mc = ("fabric", dep.get("minecraft")) if "minecraft" in dep else None
-            return {"loader": "fabric", "ids": [d.get("id", "")] + list(d.get("provides", []) or []),
-                    "name": d.get("name") or d.get("id"), "version": d.get("version", ""), "mc": mc,
-                    "deps": [k for k in dep if k not in BUILTIN_DEPS],
-                    "breaks": [(k, "fabric", v) for k, v in (d.get("breaks") or {}).items()
-                               if k not in BUILTIN_DEPS]}
-        for toml_name, loader in (("META-INF/neoforge.mods.toml", "neoforge"), ("META-INF/mods.toml", "forge")):
-            if toml_name in names:
-                t = _toml(z.read(toml_name).decode("utf-8", "replace"))
-                mods = t.get("mods") or [{}]
-                ids = [m.get("modId", "") for m in mods]
-                deps, breaks, mc = [], [], None
-                dep_tables = t.get("dependencies") or {}
-                for _mid, lst in dep_tables.items():
-                    for dd in lst if isinstance(lst, list) else []:
-                        mid = dd.get("modId")
-                        required = dd.get("mandatory", dd.get("type", "required") == "required")
-                        if isinstance(required, str):
-                            required = required.lower() == "required"
-                        if str(dd.get("type", "")).lower() == "incompatible":
-                            if mid and mid not in BUILTIN_DEPS:
-                                breaks.append((mid, "maven", dd.get("versionRange", "")))
-                        elif mid == "minecraft":
-                            mc = ("maven", dd.get("versionRange", ""))
-                        elif mid == "neoforge":
+        metas = _jar_metas(z)
+        nested = _nested_metas(z)
+    # jar-обёртка без своего описания (Kotlin for Forge «-all») — описание берётся из вложенных модов
+    m = _pick_meta(metas or nested, loader)
+    if m is None:
+        return None
+    m = dict(m, nested_ids=[i for n in nested for i in n.get("ids") or [] if i])
+    return m
+
+
+def _pick_meta(metas, loader):
+    if not metas:
+        return None
+    if loader:
+        for want in _loader_preference(loader):
+            for m in metas:
+                if m["loader"] == want:
+                    return m
+    return metas[0]
+
+
+NESTED_DIRS = ("META-INF/jarjar/", "META-INF/jars/")  # jar-in-jar Forge/NeoForge и Fabric/Quilt
+NESTED_MAX = 32 * 1024 * 1024
+
+
+def _nested_metas(z):
+    """Описания модов, вложенных в jar (jar-in-jar): загрузчик ставит их сам, отдельный файл не нужен."""
+    out = []
+    for info in z.infolist():
+        n = info.filename
+        if not (n.endswith(".jar") and n.startswith(NESTED_DIRS) and n.count("/") == 2):
+            continue
+        if info.file_size > NESTED_MAX:
+            continue
+        try:
+            with zipfile.ZipFile(io.BytesIO(z.read(n))) as nz:
+                out.extend(_jar_metas(nz))
+        except (OSError, zipfile.BadZipFile, RuntimeError):
+            pass
+    return out
+
+
+def _loader_preference(loader):
+    """Загрузчики модов, которые запускает сборка на loader, от лучшего к худшему."""
+    return {"quilt": ("quilt", "fabric"), "neoforge": ("neoforge", "forge")}.get(loader, (loader,))
+
+
+def _jar_metas(z):
+    """Все описания мода внутри jar, в порядке quilt, fabric, neoforge, forge, mcmod.info."""
+    names = set(z.namelist())
+    out = []
+    for parse in (_meta_quilt, _meta_fabric, _meta_toml, _meta_mcmod):
+        try:
+            out.extend(parse(z, names))
+        except Exception:  # noqa: BLE001 - кривое описание одного загрузчика не мешает остальным
+            pass
+    return out
+
+
+def _meta_quilt(z, names):
+    if "quilt.mod.json" in names:
+        d = _json(z.read("quilt.mod.json"))
+        ql = d.get("quilt_loader", {})
+        meta = ql.get("metadata", {})
+        deps, mc, ranges = [], None, []
+        for dep in ql.get("depends", []):
+            if isinstance(dep, str):
+                deps.append(dep)
+            elif isinstance(dep, dict):
+                if dep.get("id") == "minecraft":
+                    mc = ("fabric", dep.get("versions", "*"))
+                elif not dep.get("optional"):
+                    deps.append(dep.get("id"))
+                    ranges.append((dep.get("id"), "fabric", dep.get("versions", "*")))
+        breaks = [(b, "fabric", "*") if isinstance(b, str) else (b.get("id"), "fabric", b.get("versions", "*"))
+                  for b in ql.get("breaks", []) or [] if isinstance(b, (str, dict))]
+        return [{"loader": "quilt", "ids": [ql.get("id", "")] + [p if isinstance(p, str) else p.get("id", "")
+                                                                for p in ql.get("provides", [])],
+                 "name": meta.get("name") or ql.get("id"), "version": ql.get("version", ""),
+                 "mc": mc, "deps": [x for x in deps if x and x not in BUILTIN_DEPS],
+                 "dep_ranges": [r for r in ranges if r[0] and r[0] not in BUILTIN_DEPS],
+                 "breaks": [b for b in breaks if b[0] and b[0] not in BUILTIN_DEPS]}]
+    return []
+
+
+def _meta_fabric(z, names):
+    if "fabric.mod.json" in names:
+        d = _json(z.read("fabric.mod.json"))
+        dep = d.get("depends") or {}
+        mc = ("fabric", dep.get("minecraft")) if "minecraft" in dep else None
+        return [{"loader": "fabric", "ids": [d.get("id", "")] + list(d.get("provides", []) or []),
+                 "name": d.get("name") or d.get("id"), "version": d.get("version", ""), "mc": mc,
+                 "deps": [k for k in dep if k not in BUILTIN_DEPS],
+                 "dep_ranges": [(k, "fabric", v) for k, v in dep.items() if k not in BUILTIN_DEPS],
+                 "breaks": [(k, "fabric", v) for k, v in (d.get("breaks") or {}).items()
+                            if k not in BUILTIN_DEPS]}]
+    return []
+
+
+def _meta_toml(z, names):
+    out = []
+    for toml_name, loader in (("META-INF/neoforge.mods.toml", "neoforge"), ("META-INF/mods.toml", "forge")):
+        if toml_name in names:
+            t = _toml(z.read(toml_name).decode("utf-8", "replace"))
+            mods = t.get("mods") or [{}]
+            ids = [m.get("modId", "") for m in mods]
+            deps, breaks, mc, ranges = [], [], None, []
+            dep_tables = t.get("dependencies") or {}
+            for _mid, lst in dep_tables.items():
+                for dd in lst if isinstance(lst, list) else []:
+                    mid = dd.get("modId")
+                    required = dd.get("mandatory", dd.get("type", "required") == "required")
+                    if isinstance(required, str):
+                        required = required.lower() == "required"
+                    if str(dd.get("type", "")).lower() == "incompatible":
+                        if mid and mid not in BUILTIN_DEPS:
+                            breaks.append((mid, "maven", dd.get("versionRange", "")))
+                    elif mid == "minecraft":
+                        mc = ("maven", dd.get("versionRange", ""))
+                    elif mid == "neoforge":
+                        if required:  # Forge-моды 1.20.1 часто пишут NeoForge необязательной зависимостью
                             loader = "neoforge"
-                        elif required and mid and mid not in BUILTIN_DEPS:
-                            deps.append(mid)
-                return {"loader": loader, "ids": ids, "name": mods[0].get("displayName") or ids[0],
-                        "version": mods[0].get("version", ""), "mc": mc, "deps": deps, "breaks": breaks}
-        if "mcmod.info" in names:
-            d = _json(z.read("mcmod.info"))
-            m = (d[0] if isinstance(d, list) and d else (d.get("modList") or [{}])[0] if isinstance(d, dict) else {})
-            mcv = m.get("mcversion")
-            return {"loader": "forge", "ids": [m.get("modid", "")], "name": m.get("name") or m.get("modid"),
-                    "version": m.get("version", ""), "mc": ("exact", mcv) if mcv else None, "deps": []}
-    return None
+                    elif required and mid and mid not in BUILTIN_DEPS:
+                        deps.append(mid)
+                        ranges.append((mid, "maven", dd.get("versionRange", "")))
+            out.append({"loader": loader, "ids": ids, "name": mods[0].get("displayName") or ids[0],
+                        "version": mods[0].get("version", ""), "mc": mc, "deps": deps, "dep_ranges": ranges,
+                        "breaks": breaks})
+    return out
+
+
+def _meta_mcmod(z, names):
+    if "mcmod.info" in names:
+        d = _json(z.read("mcmod.info"))
+        m = (d[0] if isinstance(d, list) and d else (d.get("modList") or [{}])[0] if isinstance(d, dict) else {})
+        mcv = m.get("mcversion")
+        return [{"loader": "forge", "ids": [m.get("modid", "")], "name": m.get("name") or m.get("modid"),
+                 "version": m.get("version", ""), "mc": ("exact", mcv) if mcv else None, "deps": []}]
+    return []
 
 
 def _json(b):
@@ -674,13 +756,16 @@ def check_folder(folder, mc, loader, online=True, metas=None):
         except Exception:  # noqa: BLE001
             upd = {}
 
-    results, all_ids, mr_projects = [], set(), set()
+    results, all_ids, mr_projects, wants = [], set(), set(), {}
     metas = {} if metas is None else metas
     for e in ents:
-        meta = read_jar_meta(e["path"])
+        meta = read_jar_meta(e["path"], loader)
         metas[e["file"]] = meta
         if meta and e["enabled"]:
             all_ids.update(i for i in meta.get("ids", []) if i)
+            all_ids.update(meta.get("nested_ids") or [])
+            for did, kind, spec in meta.get("dep_ranges") or []:
+                wants.setdefault(did, []).append((meta.get("name") or e["base"], kind, spec))
         v = ident.get(sha.get(e["file"]))
         if v and e["enabled"]:
             mr_projects.add(v["project_id"])
@@ -721,8 +806,14 @@ def check_folder(folder, mc, loader, online=True, metas=None):
             missing = [{"name": d, "pid": None} for d in meta.get("deps", []) if d not in all_ids]
         u = upd.get(h)
         update = u if (u and v and u["version_id"] != v["version_id"]) else None
+        held = None
+        if update and meta:
+            held = update_conflict(update.get("version_number", ""), mc, meta.get("ids") or [], wants)
+            if held:
+                update = None
         results.append({"file": e["file"], "enabled": e["enabled"], "title": title, "version": version,
-                        "status": status, "reason": reason, "update": update, "missing": missing,
+                        "status": status, "reason": reason, "update": update, "update_held": held,
+                        "missing": missing,
                         "project_id": (v or {}).get("project_id") or im.get("project_id"),
                         "source": "modrinth" if v else im.get("source"), "icon_url": im.get("icon_url", "")})
     # человеческие названия для недостающих зависимостей с Modrinth
@@ -737,6 +828,37 @@ def check_folder(folder, mc, loader, online=True, metas=None):
         except Exception:  # noqa: BLE001
             pass
     return results
+
+
+def _update_version(version_number, mc):
+    """Версия мода из version_number Modrinth: «1.20.1-1.1.0» -> (1, 1, 0), «1.3.6+1.20.1» -> (1, 3, 6).
+    Номер версии Minecraft пропускается; None, если версию не выделить."""
+    mct = _vt(mc) if mc else None
+    toks = [tuple(int(x) for x in t.split(".")) for t in re.findall(r"\d+(?:\.\d+)+|\d+", version_number or "")]
+    # «1.20» и «1.20.1» при сборке на 1.20.1 — это версия игры, не мода
+    toks = [t for t in toks if not (mct and len(t) >= 2 and t == mct[:len(t)])]
+    mod = [t for t in toks if not (len(t) in (2, 3) and t[0] == 1 and 13 <= t[1] <= 30)]  # похоже на версию MC
+    return (mod or toks or [None])[0]
+
+
+def update_conflict(version_number, mc, ids, wants):
+    """Нарушит ли обновление мода (ids) версии, которые требуют другие включённые моды.
+    wants: id зависимости -> [(название мода, kind, spec)]. -> текст причины или None."""
+    vt = _update_version(version_number, mc)
+    if vt is None:
+        return None
+    for i in ids:
+        for name, kind, spec in wants.get(i, []):
+            if _range_ok(kind, spec, vt) is False:
+                return "«%s» требует %s %s" % (name, i, _pretty_spec(spec))
+    return None
+
+
+def _range_ok(kind, spec, vt):
+    """Подходит ли версия мода vt под требование зависимости -> True/False/None (не понять)."""
+    if spec in ("*", "", None) or spec == []:
+        return True
+    return _fabric_match(spec, vt) if kind == "fabric" else _maven_match(spec, vt)
 
 
 def _mod_vt(ver):
@@ -771,6 +893,14 @@ def preflight(path, mc, loader):
         if len(fs) > 1:
             problems.append("«%s» установлен %d раза: %s" % (on[fs[0]].get("name") or mid, len(fs), ", ".join(fs)))
     for f, m in sorted(on.items()):
+        for did, kind, spec in m.get("dep_ranges") or []:
+            if did not in have or did in (m.get("ids") or []):
+                continue
+            ver, name = have[did]
+            vt = _mod_vt(ver)
+            if vt is not None and _range_ok(kind, spec, vt) is False:
+                problems.append("«%s» требует «%s» %s, а установлена %s" % (
+                    m.get("name") or f, name, _pretty_spec(spec), ver))
         for bid, kind, spec in m.get("breaks") or []:
             if bid not in have or bid in (m.get("ids") or []):
                 continue

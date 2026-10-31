@@ -694,6 +694,9 @@ class ModsPage:
         dot.pack(side="left")
         tk.Label(st, text=" " + text, bg=C["panel"], fg=color, font=self.F.b(9)).pack(side="left")
         tk.Label(st, text="   " + r["file"], bg=C["panel"], fg=C["dim"], font=self.F.b(8)).pack(side="left")
+        if r.get("update_held") and r["enabled"]:
+            tk.Label(mid, text="Обновление скрыто: " + r["update_held"], bg=C["panel"], fg=C["muted"],
+                     font=self.F.b(9), anchor="w").pack(fill="x", pady=(px(4), 0))
         if r["missing"]:
             mf = tk.Frame(mid, bg=C["panel"])
             mf.pack(fill="x", pady=(px(4), 0))

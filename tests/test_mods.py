@@ -1,4 +1,5 @@
 """Метаданные модов из jar и проверка совместимости."""
+import io
 import json
 import os
 import shutil
@@ -72,6 +73,24 @@ class JarMetaTest(unittest.TestCase):
     def test_neoforge_toml(self):
         m = mods.read_jar_meta(self.jar({"META-INF/neoforge.mods.toml": MODS_TOML}))
         self.assertEqual(m["loader"], "neoforge")
+
+    def test_multiloader_jar_picks_pack_loader(self):
+        # «универсальный» jar с описаниями и для Fabric, и для Forge (Collective, Terralith, ...)
+        path = self.jar({"fabric.mod.json": {"id": "examplemod", "depends": {"minecraft": "1.20.1"}},
+                         "META-INF/mods.toml": MODS_TOML})
+        self.assertEqual(mods.read_jar_meta(path)["loader"], "fabric")  # без загрузчика — первое описание
+        self.assertEqual(mods.read_jar_meta(path, "fabric")["loader"], "fabric")
+        forge = mods.read_jar_meta(path, "forge")
+        self.assertEqual((forge["loader"], forge["deps"]), ("forge", ["geckolib"]))
+        self.assertIs(mods.jar_compat(forge, "1.20.1", "forge")[0], True)
+        self.assertEqual(mods.read_jar_meta(path, "neoforge")["loader"], "forge")  # NeoForge 1.20.1 берёт Forge-мод
+        self.assertEqual(mods.read_jar_meta(path, "quilt")["loader"], "fabric")
+
+    def test_optional_neoforge_dep_keeps_forge(self):
+        opt = MODS_TOML + '\n[[dependencies.examplemod]]\nmodId="neoforge"\nmandatory=false\nversionRange="[20,)"\n'
+        self.assertEqual(mods.read_jar_meta(self.jar({"META-INF/mods.toml": opt}))["loader"], "forge")
+        req = MODS_TOML + '\n[[dependencies.examplemod]]\nmodId="neoforge"\nmandatory=true\nversionRange="[20,)"\n'
+        self.assertEqual(mods.read_jar_meta(self.jar({"META-INF/mods.toml": req}))["loader"], "neoforge")
 
     def test_mini_toml_matches_tomllib(self):
         t = mods._mini_toml(MODS_TOML)
@@ -235,6 +254,57 @@ class PreflightTest(unittest.TestCase):
         self.fabric("b.jar", "bmod", breaks={"modmenu": ">=9"})
         p = mods.preflight(self.dir, "1.21.4", "fabric")
         self.assertEqual(p, ["«Bmod» несовместим с «Modmenu» 9.0.0+mc1.21"])
+
+    def test_dependency_version_range(self):
+        # Bosses of Mass Destruction требует Cerbons API ниже 1.1.0 — Forge с 1.1.0 не запустится
+        self.fabric("cerbons.jar", "cerbons_api", "1.1.0")
+        self.fabric("bomd.jar", "bomd", depends={"cerbons_api": "<1.1.0"})
+        self.fabric("ok.jar", "okmod", depends={"cerbons_api": ">=1.0"})
+        p = mods.preflight(self.dir, "1.21.4", "fabric")
+        self.assertEqual(p, ["«Bomd» требует «Cerbons_Api» <1.1.0, а установлена 1.1.0"])
+
+    def test_update_held_by_dependency_range(self):
+        self.fabric("cerbons.jar", "cerbons_api", "1.0.0")
+        self.fabric("bomd.jar", "bomd", depends={"cerbons_api": "<1.1.0"})
+        self.fabric("other.jar", "other", "2.0")
+        ident = {"cerbons": {"version_id": "c1", "project_id": "pc", "version_number": "1.0.0", "deps": [],
+                             "game_versions": ["1.21.4"], "loaders": ["fabric"]},
+                 "other": {"version_id": "o1", "project_id": "po", "version_number": "2.0", "deps": [],
+                           "game_versions": ["1.21.4"], "loaders": ["fabric"]}}
+        upd = {"cerbons": {"version_id": "c2", "version_number": "1.21.4-1.1.0"},
+               "other": {"version_id": "o2", "version_number": "2.1"}}
+        sha = {"cerbons.jar": "cerbons", "bomd.jar": "bomd", "other.jar": "other"}
+        with mock.patch.object(mods.net, "sha1_file", side_effect=lambda p: sha[os.path.basename(p)]),                 mock.patch.object(mods.Modrinth, "identify", return_value=ident),                 mock.patch.object(mods.Modrinth, "updates", return_value=upd):
+            res = {r["file"]: r for r in mods.check_folder(mods.ModFolder(self.dir), "1.21.4", "fabric")}
+        self.assertIsNone(res["cerbons.jar"]["update"])
+        self.assertEqual(res["cerbons.jar"]["update_held"], "«Bomd» требует cerbons_api <1.1.0")
+        self.assertEqual(res["other.jar"]["update"]["version_id"], "o2")
+        self.assertIsNone(res["other.jar"]["update_held"])
+
+    def test_update_version_parsing(self):
+        for num, want in (("1.1.0", (1, 1, 0)), ("1.20.1-1.1.0", (1, 1, 0)), ("1.3.6+1.20.1-patch.1", (1, 3, 6)),
+                          ("1.20-4.0.6", (4, 0, 6)), ("1.20.4-1.5.5", (1, 5, 5)), ("1.20.1-1.16.0", (1, 16, 0)),
+                          ("v8.0.8-1.20.1-Forge", (8, 0, 8)), ("beta", None)):
+            with self.subTest(num=num):
+                self.assertEqual(mods._update_version(num, "1.20.1"), want)
+
+    def test_nested_jar_in_jar_counts_as_installed(self):
+        def jar(files):
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w") as z:
+                for name, data in files.items():
+                    z.writestr(name, data if isinstance(data, (str, bytes)) else json.dumps(data))
+            return buf.getvalue()
+        lib = jar({"fabric.mod.json": {"id": "puzzlesaccessapi", "version": "20.1.1"}})
+        with open(os.path.join(self.dir, "puzzles.jar"), "wb") as f:
+            f.write(jar({"fabric.mod.json": {"id": "puzzleslib", "depends": {"puzzlesaccessapi": "*"}},
+                         "META-INF/jars/puzzlesaccessapi.jar": lib}))
+        # обёртка без своего описания (как kotlinforforge-all.jar) — описание из вложенного мода
+        with open(os.path.join(self.dir, "kff-all.jar"), "wb") as f:
+            f.write(jar({"META-INF/jars/kffmod.jar": jar({"fabric.mod.json": {"id": "kotlinforforge"}})}))
+        self.fabric("user.jar", "usermod", depends={"puzzleslib": "*", "kotlinforforge": "*"})
+        self.assertEqual(mods.preflight(self.dir, "1.21.4", "fabric"), [])
+        self.assertEqual(mods.read_jar_meta(os.path.join(self.dir, "kff-all.jar"))["ids"], ["kotlinforforge"])
 
     def test_disabled_mods_ignored(self):
         self.fabric("old.jar.disabled", "oldmod", mc="1.20.1")
