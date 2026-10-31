@@ -36,8 +36,21 @@ def ssl_context(host=None):
     if _SSL_CTX is None:
         with _SSL_LOCK:
             if _SSL_CTX is None:
-                _SSL_CTX = ssl.create_default_context()
+                _SSL_CTX = _default_context()
     return _SSL_CTX
+
+
+def _default_context():
+    """Хранилище Windows (корни антивирусов, корпоративных прокси) + набор Mozilla: Windows докачивает
+    корневые сертификаты по требованию, OpenSSL так не умеет, и на «свежем» ПК без набора падают
+    загрузки с сайтов на новых корнях (cdn.modrinth.com — Certainly Root R1)."""
+    ctx = ssl.create_default_context()
+    try:
+        from .ca_bundle import CA_PEM
+        ctx.load_verify_locations(cadata=CA_PEM)
+    except Exception:  # noqa: BLE001 - без набора остаётся хранилище Windows, как раньше
+        pass
+    return ctx
 
 
 def _urlopen(req, timeout):
