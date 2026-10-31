@@ -40,9 +40,9 @@ def scrub(text, home=None, user=None, dirs=None):
 
 def is_expected(exc):
     """Ошибки, которые случаются не из-за кода лаунчера: сеть, вход, каталоги модов, отмена."""
-    from . import auth, mc_status, mods, mrpack, net, packs, premium
+    from . import auth, cfpack, mc_status, mods, mrpack, net, packs, premium
     return isinstance(exc, (OSError, net.HttpError, net.Cancelled, auth.AuthError, mods.ModsError, premium.ApiError,
-                            mrpack.MrpackError, packs.PackError, mc_status.PingError))
+                            mrpack.MrpackError, cfpack.CfPackError, packs.PackError, mc_status.PingError))
 
 
 def signature(trace):

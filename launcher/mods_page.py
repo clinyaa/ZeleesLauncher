@@ -10,7 +10,7 @@ import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor
 from tkinter import filedialog, ttk, messagebox
 
-from . import loaders, mods, mrpack, net, packs
+from . import cfpack, loaders, mods, mrpack, net, packs
 from .installer import install_version
 from .launch import instance_dir
 from .app_util import open_path
@@ -68,7 +68,7 @@ class ModsPage:
         self.build_box.bind("<<ComboboxSelected>>", lambda e: self._build_selected())
         app._btn(top, "+ Новая", self._new_build, style="sel", padx=14).pack(side="left")
         app._btn(top, "Сборка по коду", lambda: PackCodeDialog(self), padx=14).pack(side="left", padx=(px(8), 0))
-        app._btn(top, "Импорт .mrpack", self.import_mrpack, padx=14).pack(side="left", padx=(px(8), 0))
+        app._btn(top, "Импорт модпака", self.import_mrpack, padx=14).pack(side="left", padx=(px(8), 0))
         app._btn(top, "Играть", self._play_build, style="accent", padx=16).pack(side="right")
         self.share_btn = app._btn(top, "Поделиться ▾", self._share_menu, padx=14)
         self.share_btn.pack(side="right", padx=px(8))
@@ -202,15 +202,19 @@ class ModsPage:
         ShareDialog(self)
 
     def import_mrpack(self, path=None):
-        """Ставит модпак из файла .mrpack (без path — спрашивает файл)."""
+        """Ставит модпак из файла: .mrpack (Modrinth) или .zip (CurseForge). Без path — спрашивает файл."""
         app = self.app
         if not path:
-            path = filedialog.askopenfilename(title="Модпак Modrinth", parent=app.root,
-                                              filetypes=[("Модпак Modrinth", "*.mrpack"), ("Все файлы", "*.*")])
+            path = filedialog.askopenfilename(title="Модпак Modrinth или CurseForge", parent=app.root,
+                                              filetypes=[("Модпаки", "*.mrpack *.zip"), ("Модпак Modrinth", "*.mrpack"),
+                                                         ("Модпак CurseForge", "*.zip"), ("Все файлы", "*.*")])
         if not path:
             return
         if app.busy:
             app.status("Подождите — лаунчер уже занят", C["warn"])
+            return
+        if cfpack.is_cfpack(path):
+            self.import_cfpack(path)
             return
         try:
             pack = mrpack.read(path)
@@ -253,6 +257,66 @@ class ModsPage:
                 for what, why in failed:
                     app.ui(app.log, "Не скачано: %s — %s" % (what, why), "WARN")
                 app.ui(_build_done, app, vid, pack["name"], failed, "Импорт .mrpack")
+            except net.Cancelled:
+                _remove_build(root, vid)
+                app.ui(app.status, "Отменено", C["warn"])
+            except Exception as e:  # noqa: BLE001
+                _remove_build(root, vid)
+                app.ui(app.log, traceback.format_exc(), "ERROR")
+                app.ui(app._error, e)
+            finally:
+                app.ui(app._set_busy, False)
+        app.bg(work)
+
+    def import_cfpack(self, path):
+        """Ставит модпак CurseForge (.zip с manifest.json): моды по id через CurseForge API, настройки из overrides."""
+        app, title_box = self.app, "Импорт модпака CurseForge"
+        try:
+            pack = cfpack.read(path)
+        except cfpack.CfPackError as e:
+            messagebox.showerror(title_box, str(e), parent=app.root)
+            return
+        try:
+            settings = app._collect_settings()
+        except ValueError as e:
+            messagebox.showerror(title_box, str(e), parent=app.root)
+            return
+        cf_key = (settings.get("curseforge_key") or "").strip()
+        if pack["files"] and not cf_key:
+            messagebox.showerror(title_box, "Моды этого модпака скачиваются с CurseForge, а для этого нужен "
+                                 "личный API-ключ.\n\nПолучите бесплатный ключ на console.curseforge.com и вставьте "
+                                 "его в «Опции → CurseForge API-ключ», затем повторите импорт.", parent=app.root)
+            return
+        title = pack["name"] + (" " + pack["version"] if pack["version"] else "")
+        text = "%s%s\nMinecraft %s  ·  %s %s\nМодов и файлов: %d, файлов настроек: %d" % (
+            title, ("\nАвтор: " + pack["author"]) if pack["author"] else "", pack["mc"],
+            loaders.LOADER_NAMES[pack["loader"]], pack["loader_version"], len(pack["files"]), pack["overrides"])
+        text += "\n\nБудет создана отдельная сборка со своей папкой — ваши другие сборки и миры не изменятся."
+        if not messagebox.askyesno(title_box, text + "\n\nУстановить?", parent=app.root):
+            return
+        app.show_page("home")
+        app._set_busy(True)
+
+        def work():
+            root = settings["game_dir"]
+            vid = None
+            try:
+                app.ui(app.status, "Модпак «%s»: получаю список файлов у CurseForge..." % pack["name"])
+                items, failed = cfpack.resolve(pack, cf_key)
+                ld, lv, mc = pack["loader"], pack["loader_version"], pack["mc"]
+                parent = packs.find_loader_version(root, app.manifest, ld, lv, mc)
+                if not parent:
+                    parent = install_loader(app, settings, ld, mc, lv)
+                vid = packs.create_pack_version(root, app.manifest, pack["name"], "curseforge", parent)
+                game_dir = instance_dir(settings, root, vid)
+                app.ui(app.status, "Модпак «%s»: копирую настройки..." % pack["name"])
+                mrpack.extract_overrides(path, game_dir, (pack["overrides_dir"] + "/",))
+                packs.install_files(game_dir, items, settings.get("download_threads", 16), app.progress, app.cancel)
+                app.ui(app.log, "Модпак CurseForge «%s» (%s) установлен: %s, файлов: %d" % (
+                    title, os.path.basename(path), vid, len(items)))
+                for what, why in failed:
+                    app.ui(app.log, "Не скачано: %s — %s" % (what, why), "WARN")
+                app.ui(_build_done, app, vid, pack["name"], failed, title_box)
             except net.Cancelled:
                 _remove_build(root, vid)
                 app.ui(app.status, "Отменено", C["warn"])

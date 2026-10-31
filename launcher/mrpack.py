@@ -95,12 +95,12 @@ def read(path):
             "files": files, "skipped": skipped, "overrides": overrides}
 
 
-def extract_overrides(path, game_dir):
-    """Копирует overrides/ и client-overrides/ в папку сборки. Возвращает число файлов."""
+def extract_overrides(path, game_dir, prefixes=OVERRIDES):
+    """Копирует overrides/ и client-overrides/ (или другие папки prefixes) в папку сборки. Возвращает число файлов."""
     root = os.path.normpath(game_dir)
     n = 0
     with zipfile.ZipFile(path) as z:
-        for prefix in OVERRIDES:
+        for prefix in prefixes:
             for info in z.infolist():
                 name = info.filename
                 if not name.startswith(prefix) or name.endswith("/"):

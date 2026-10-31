@@ -224,6 +224,23 @@ class CurseForge:
                 res[str(f["id"])] = self._to_file(f, f.get("modId"))
         return res
 
+    def projects(self, ids):
+        """project_id -> {"title", "icon_url", "page_url", "class_id"} (одним запросом на 100 проектов)."""
+        ids, res = [int(x) for x in ids], {}
+        for i in range(0, len(ids), 100):
+            try:
+                r = net.post_json(CURSEFORGE + "/mods", {"modIds": ids[i:i + 100]},
+                                  headers={"x-api-key": self.api_key}, timeout=20)
+            except net.HttpError as e:
+                if e.status in (401, 403):
+                    raise ModsError("CurseForge отклонил API-ключ. Проверьте его в настройках.")
+                raise
+            for m in r.get("data", []):
+                res[str(m["id"])] = {"title": m.get("name", ""), "class_id": m.get("classId"),
+                                     "icon_url": ((m.get("logo") or {}).get("thumbnailUrl") or ""),
+                                     "page_url": (m.get("links") or {}).get("websiteUrl", "")}
+        return res
+
     def project(self, pid):
         m = self._get("/mods/%s" % pid).get("data", {})
         return {"source": self.key, "id": str(m.get("id", pid)), "title": m.get("name", str(pid)),
