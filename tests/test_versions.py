@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from launcher import java, loaders, versions
+from launcher import java, launch, loaders, versions
 
 VANILLA = {
     "id": "1.20.1", "type": "release", "mainClass": "net.minecraft.client.main.Main",
@@ -61,6 +61,26 @@ class ResolveTest(unittest.TestCase):
         self.assertEqual(vd["arguments"]["jvm"], ["-cp", "${classpath}", "-DFabricMcEmu= net.minecraft.client.main.Main "])
         self.assertEqual(vd["arguments"]["game"], VANILLA["arguments"]["game"])
         self.assertEqual(versions.required_java(vd), ("java-runtime-gamma", 17))
+
+    def test_forge_client_jar_named_after_version(self):
+        forge = {"id": "1.20.1-forge-47.4.28", "inheritsFrom": "1.20.1",
+                 "arguments": {"jvm": ["-DignoreList=bootstraplauncher,forge-,${version_name}.jar"]}}
+        self.put(VANILLA)
+        self.put(forge)
+        vanilla_jar = versions.version_jar_path(self.root, "1.20.1")
+        with open(vanilla_jar, "wb") as f:
+            f.write(b"PK-vanilla")
+        vd = versions.resolve_version(self.root, forge["id"], None)
+        own = launch.own_client_jar(vd, self.root, vanilla_jar)
+        self.assertEqual(own, versions.version_jar_path(self.root, forge["id"]))
+        with open(own, "rb") as f:
+            self.assertEqual(f.read(), b"PK-vanilla")
+        # Fabric и ванильные версии берут jar родителя как есть
+        self.put(FABRIC)
+        vd = versions.resolve_version(self.root, FABRIC["id"], None)
+        self.assertEqual(launch.own_client_jar(vd, self.root, vanilla_jar), vanilla_jar)
+        vd = versions.resolve_version(self.root, "1.20.1", None)
+        self.assertEqual(launch.own_client_jar(vd, self.root, vanilla_jar), vanilla_jar)
 
     def test_missing_version(self):
         with self.assertRaises(FileNotFoundError):

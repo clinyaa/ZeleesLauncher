@@ -3,13 +3,14 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import threading
 
 from .config import APP_NAME, APP_VERSION
 from .installer import collect_libraries, client_task, asset_info, game_assets_dir, logging_info, extract_natives
 from .rules import is_allowed, os_name
-from .versions import version_dir
+from .versions import version_dir, version_jar_path
 
 DEFAULT_JVM = [
     "-XX:+UnlockExperimentalVMOptions", "-XX:+UseG1GC", "-XX:G1NewSizePercent=20",
@@ -60,6 +61,22 @@ def _uses_var(args, name):
     return "${%s}" % name in json.dumps(args or [])
 
 
+def own_client_jar(vdata, root, jar_path):
+    """Forge и NeoForge 1.17+ сами подключают пропатченный Minecraft, а ванильный jar пропускают по имени:
+    -DignoreList=...,${version_name}.jar. Поэтому клиент должен лежать в папке своей версии под её именем,
+    как у официального лаунчера, иначе Java падает с «Modules minecraft and _1._20._1 export package»."""
+    if "${version_name}.jar" not in json.dumps((vdata.get("arguments") or {}).get("jvm") or []):
+        return jar_path
+    own = version_jar_path(root, vdata["id"])
+    if os.path.normcase(os.path.abspath(own)) == os.path.normcase(os.path.abspath(jar_path)):
+        return jar_path
+    if not os.path.isfile(own) or os.path.getsize(own) != os.path.getsize(jar_path):
+        os.makedirs(os.path.dirname(own), exist_ok=True)
+        shutil.copyfile(jar_path, own + ".part")
+        os.replace(own + ".part", own)
+    return own
+
+
 def build_command(vdata, root, game_dir, java_exe, account, settings, demo=False, server=None):
     """Возвращает (cmd_list, natives_dir). Предполагается, что версия уже установлена.
     server=(host, port) — сразу подключиться к серверу (port 0 = по умолчанию / SRV)."""
@@ -74,7 +91,7 @@ def build_command(vdata, root, game_dir, java_exe, account, settings, demo=False
         features["is_quick_play_multiplayer"] = True
     classpath, natives, _ = collect_libraries(vdata, root, features)
     jar_path, _ = client_task(vdata, root)
-    classpath = classpath + [jar_path]
+    classpath = classpath + [own_client_jar(vdata, root, jar_path)]
     natives_dir = os.path.join(version_dir(root, vid), "natives")
     extract_natives(natives, natives_dir)
     index_id, _, _ = asset_info(vdata, root)
