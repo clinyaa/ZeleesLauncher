@@ -4,6 +4,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 from launcher import java, loaders, versions
 
@@ -108,6 +109,22 @@ class DetectLoaderTest(unittest.TestCase):
         self.assertEqual(loaders.neoforge_mc("21.0.1"), "1.21")
         self.assertEqual(loaders.neoforge_mc("26.1.0.5"), "26.1")
         self.assertIsNone(loaders.neoforge_mc("garbage"))
+
+    def test_forge_versions_fallback_url(self):
+        promos = {"promos": {"1.20.1-recommended": "47.4.0", "1.20.1-latest": "47.4.28"}}
+        calls = []
+
+        def get_json(url):
+            calls.append(url)
+            if url == loaders.FORGE_PROMOS[0]:
+                raise IOError("HTTP 404")
+            return promos
+        with mock.patch.object(loaders.net, "get_json", get_json):
+            self.assertEqual(loaders.loader_versions("forge", "1.20.1"), ["47.4.0", "47.4.28"])
+        self.assertEqual(calls, list(loaders.FORGE_PROMOS))
+        with mock.patch.object(loaders.net, "get_json", side_effect=IOError("HTTP 404")), \
+                self.assertRaises(IOError):
+            loaders.loader_versions("forge", "1.20.1")
 
     def test_modrinth_loaders(self):
         self.assertEqual(loaders.modrinth_loaders("quilt"), ["quilt", "fabric"])

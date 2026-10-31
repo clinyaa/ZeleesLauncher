@@ -8,7 +8,9 @@ from .versions import version_dir, version_json_path
 
 FABRIC_META = "https://meta.fabricmc.net/v2"
 QUILT_META = "https://meta.quiltmc.org/v3"
-FORGE_PROMOS = "https://maven.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json"
+# Список рекомендуемых версий переехал с maven на files (на maven теперь 404); старый адрес — запасной.
+FORGE_PROMOS = ("https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json",
+                "https://maven.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json")
 FORGE_MAVEN = "https://maven.minecraftforge.net/net/minecraftforge/forge"
 NEOFORGE_VERSIONS = "https://maven.neoforged.net/api/maven/versions/releases/net/neoforged/neoforge"
 NEOFORGE_MAVEN = "https://maven.neoforged.net/releases/net/neoforged/neoforge"
@@ -73,7 +75,7 @@ def loader_versions(loader, mc):
         vs = [d["loader"]["version"] for d in data]
         return [v for v in vs if "beta" not in v] + [v for v in vs if "beta" in v]
     if loader == "forge":
-        promos = net.get_json(FORGE_PROMOS).get("promos", {})
+        promos = _forge_promos()
         res = []
         for key in ("%s-recommended" % mc, "%s-latest" % mc):
             if key in promos and promos[key] not in res:
@@ -86,6 +88,16 @@ def loader_versions(loader, mc):
         stable = [v for v in good if "beta" not in v]
         return stable + [v for v in good if "beta" in v]
     return []
+
+
+def _forge_promos():
+    err = None
+    for url in FORGE_PROMOS:
+        try:
+            return net.get_json(url).get("promos", {})
+        except Exception as e:  # noqa: BLE001
+            err = err or e  # показываем ошибку основного адреса, а не запасного
+    raise err
 
 
 def neoforge_mc(v):
